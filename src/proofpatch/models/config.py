@@ -262,7 +262,7 @@ class ApplyConfig(StrictConfigModel):
 class ProofPatchConfig(StrictConfigModel):
     schema_version: Literal[1] = 1
     project: ProjectConfig
-    mode: Literal["protected"] = "protected"
+    mode: Literal["protected", "observation"] = "protected"
     repository: RepositoryConfig = RepositoryConfig()
     runtime: RuntimeConfig
     network: NetworkConfig = NetworkConfig()

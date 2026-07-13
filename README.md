@@ -22,14 +22,19 @@ fresh clone. The user's original repository remains unchanged until explicit acc
 python -m pip install -e .
 proofpatch --version
 proofpatch --help
+proofpatch init --template python
+proofpatch doctor
 proofpatch list
 proofpatch status pp_20260713_a4f92b18ce31
 proofpatch inspect pp_20260713_a4f92b18ce31 --events
+proofpatch inspect pp_20260713_a4f92b18ce31 --patch
 proofpatch receipt pp_20260713_a4f92b18ce31 --verify-integrity
 proofpatch apply pp_20260713_a4f92b18ce31
 proofpatch run --config proofpatch.yml --issue "Reported failure" --yes
 proofpatch resume pp_20260713_a4f92b18ce31 --config proofpatch.yml --yes
 proofpatch abort pp_20260713_a4f92b18ce31
+proofpatch clean pp_20260713_a4f92b18ce31
+proofpatch clean --completed --older-than 30d --yes
 proofpatch verify-patch --baseline-command "python reproduce.py" --patch-file candidate.diff
 ```
 

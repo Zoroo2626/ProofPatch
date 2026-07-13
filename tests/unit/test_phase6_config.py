@@ -92,7 +92,6 @@ def test_configuration_loads_full_phase6_inputs_and_discovers_priority(tmp_path:
     [
         "schema_version: 2",
         "unknown: true",
-        "mode: observation",
     ],
 )
 def test_configuration_rejects_wrong_schema_unknowns_and_unprotected_mode(
@@ -205,8 +204,8 @@ def test_run_resume_and_abort_cli_commands_delegate_to_workflow(
             del coordinator, backend
 
         def run(self, repository: Path, issue: str, plan: object) -> WorkflowOutcome:
-            del repository, issue, plan
-            calls.append("run")
+            del repository, issue
+            calls.append(f"run:{getattr(plan, 'retain_workspaces', None)}")
             return outcome
 
         def resume(
@@ -245,6 +244,10 @@ def test_run_resume_and_abort_cli_commands_delegate_to_workflow(
             "--issue",
             "Reported failure",
             "--yes",
+            "--keep-workspaces",
+            "--json",
+            "--verbose",
+            "--no-color",
         ],
     )
     resume = runner.invoke(
@@ -253,7 +256,8 @@ def test_run_resume_and_abort_cli_commands_delegate_to_workflow(
     )
     abort = runner.invoke(app, ["abort", run_id])
     assert run.exit_code == resume.exit_code == abort.exit_code == 0
-    assert calls == ["run", "resume", "abort"]
+    assert '"verified":true' in run.output
+    assert calls == ["run:True", "resume", "abort"]
 
 
 def test_configuration_exercises_nested_arrays_and_rejects_edge_cases(tmp_path: Path) -> None:

@@ -1,8 +1,11 @@
 """Phase 0 command-line application foundation."""
 
 import os
+import re
 import shlex
+import stat
 from collections.abc import Callable
+from datetime import timedelta
 from pathlib import Path
 from typing import Annotated
 
@@ -20,6 +23,7 @@ from proofpatch.integrations.github import (
     append_github_environment_file,
     append_github_outputs,
 )
+from proofpatch.logging import configure_logging
 from proofpatch.models.config import ProofPatchConfig, discover_configuration, load_configuration
 from proofpatch.models.execution import (
     CommandOracleSpec,
@@ -30,9 +34,18 @@ from proofpatch.models.execution import (
     ResourceLimits,
 )
 from proofpatch.models.run import RunStatus
+from proofpatch.security.paths import validate_proofpatch_data_path
+from proofpatch.services.cleanup import RunCleanupPlan, RunCleanupService
+from proofpatch.services.configuration import validate_protected_configuration
 from proofpatch.services.coordinator import RunCoordinator
 from proofpatch.services.data_directories import get_app_directories
+from proofpatch.services.diagnostics import DiagnosticLevel, DoctorReport, DoctorService
 from proofpatch.services.evidence import canonical_json_bytes
+from proofpatch.services.initialization import (
+    InitMode,
+    InitTemplate,
+    initialize_repository,
+)
 from proofpatch.services.investigation import SetupCommand
 from proofpatch.services.patching import PatchService
 from proofpatch.services.receipt import ReceiptService
@@ -82,6 +95,41 @@ def version_command() -> None:
     _print_version()
 
 
+@app.command("init")
+def init_command(
+    mode: Annotated[
+        InitMode,
+        typer.Option("--mode", help="Starter assurance mode: protected or observation."),
+    ] = InitMode.PROTECTED,
+    template: Annotated[
+        InitTemplate | None,
+        typer.Option(
+            "--template",
+            help="Starter runtime: python, node, or minimal; otherwise detect conservatively.",
+        ),
+    ] = None,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Replace an existing regular configuration file."),
+    ] = False,
+) -> None:
+    """Create a deterministic, model-validated starter configuration."""
+
+    result = initialize_repository(Path.cwd(), mode=mode, template=template, force=force)
+    typer.echo(f"Created {result.path.name} ({result.mode.value}, {result.template.value})")
+    typer.echo("Next: review the configuration, then run proofpatch doctor")
+
+
+@app.command("doctor")
+def doctor_command() -> None:
+    """Check local protected-execution prerequisites without printing secret values."""
+
+    report = DoctorService(get_app_directories()).check(Path.cwd())
+    _print_doctor_report(report)
+    if report.exit_code is not ExitCode.SUCCESS:
+        raise typer.Exit(code=int(report.exit_code))
+
+
 @app.command("list")
 def list_command() -> None:
     """List evidence-backed runs, including runs missing from the metadata index."""
@@ -112,6 +160,16 @@ def inspect_command(
         bool,
         typer.Option("--events", help="Print every canonical evidence event."),
     ] = False,
+    patch: Annotated[
+        bool,
+        typer.Option("--patch", help="Print integrity-checked patch metadata and changed paths."),
+    ] = False,
+    logs: Annotated[
+        str | None,
+        typer.Option(
+            "--logs", help="Print persisted logs for investigation, patch, or verification."
+        ),
+    ] = None,
 ) -> None:
     """Verify a run and optionally print its complete evidence chain."""
 
@@ -124,6 +182,11 @@ def inspect_command(
     if events:
         for event in status.events:
             typer.echo(canonical_json_bytes(event.model_dump(mode="json")).decode("utf-8"))
+    if patch:
+        patch_record = PatchService(coordinator).load_patch(run_id)
+        typer.echo(canonical_json_bytes(patch_record.model_dump(mode="json")).decode("utf-8"))
+    if logs is not None:
+        _print_inspection_logs(coordinator, run_id, logs)
 
 
 @app.command("receipt")
@@ -182,6 +245,7 @@ def apply_command(
 
 @app.command("run")
 def run_command(
+    context: typer.Context,
     repository: Annotated[
         Path,
         typer.Option(
@@ -203,7 +267,10 @@ def run_command(
         typer.Option("--issue-file", file_okay=True, dir_okay=False, resolve_path=True),
     ] = None,
     agent: Annotated[str | None, typer.Option("--agent", help="Agent adapter name.")] = None,
-    mode: Annotated[str, typer.Option("--mode", help="Execution assurance mode.")] = "protected",
+    mode: Annotated[
+        InitMode,
+        typer.Option("--mode", help="Execution assurance mode: protected or observation."),
+    ] = InitMode.PROTECTED,
     yes: Annotated[
         bool,
         typer.Option(
@@ -211,11 +278,30 @@ def run_command(
             help="Confirm configured secret forwarding and agent network access.",
         ),
     ] = False,
+    keep_workspaces: Annotated[
+        bool,
+        typer.Option("--keep-workspaces", help="Retain disposable workspaces after completion."),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Print the final workflow result as canonical JSON."),
+    ] = False,
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", help="Enable verbose ProofPatch controller logs."),
+    ] = False,
+    no_color: Annotated[
+        bool,
+        typer.Option("--no-color", help="Disable terminal color output."),
+    ] = False,
 ) -> None:
     """Run investigation, reproduction, patching, and fresh protected verification."""
 
-    if mode != "protected":
+    if mode is not InitMode.PROTECTED:
         raise ConfigurationError("The full workflow requires protected mode")
+    if no_color or json_output:
+        context.color = False
+    configure_logging(verbose=verbose, json_output=json_output)
     selected = discover_configuration(repository) if config is None else config
     loaded = load_configuration(selected)
     if agent is not None:
@@ -225,11 +311,15 @@ def run_command(
         loaded = loaded.model_copy(
             update={"agent": loaded.agent.model_copy(update={"adapter": agent})}
         )
+    if keep_workspaces:
+        loaded = loaded.model_copy(
+            update={"evidence": loaded.evidence.model_copy(update={"retain_workspaces": True})}
+        )
     issue_summary = _resolve_issue(loaded, issue, issue_file)
     backend = DockerBackend()
     plan = _workflow_plan(loaded, backend, yes=yes)
     outcome = WorkflowService(_coordinator(), backend).run(repository, issue_summary, plan)
-    _print_workflow_outcome(outcome)
+    _print_workflow_outcome(outcome, json_output=json_output)
 
 
 @app.command("resume")
@@ -276,6 +366,52 @@ def abort_command(run_id: Annotated[str, typer.Argument(help="Active ProofPatch 
 
     state = WorkflowService(_coordinator(), DockerBackend()).abort(run_id)
     typer.echo(f"Run {run_id}: {state.value}")
+
+
+@app.command("clean")
+def clean_command(
+    run_id: Annotated[
+        str | None,
+        typer.Argument(help="Terminal ProofPatch run ID to clean."),
+    ] = None,
+    completed: Annotated[
+        bool,
+        typer.Option("--completed", help="Select completed runs older than the requested age."),
+    ] = False,
+    older_than: Annotated[
+        str | None,
+        typer.Option("--older-than", help="Minimum completed age, such as 30d, 12h, or 45m."),
+    ] = None,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="Perform the displayed cleanup without a preview-only run."),
+    ] = False,
+) -> None:
+    """Preview or clean disposable workspaces from evidence-verified terminal runs."""
+
+    if (run_id is None) == (not completed):
+        raise ConfigurationError("Choose either one run ID or --completed")
+    service = RunCleanupService(_coordinator())
+    if run_id is not None:
+        if older_than is not None:
+            raise ConfigurationError("--older-than is valid only with --completed")
+        plan = service.clean(run_id) if yes else service.preview(run_id)
+        _print_cleanup_plan(plan, executed=yes)
+        return
+    if older_than is None:
+        raise ConfigurationError("--completed requires --older-than")
+    age = _parse_duration(older_than)
+    statuses = service.completed_before(age)
+    if not statuses:
+        typer.echo("No completed runs matched the requested age.")
+        return
+    for status in statuses:
+        plan = (
+            service.clean(status.manifest.run_id)
+            if yes
+            else service.preview(status.manifest.run_id)
+        )
+        _print_cleanup_plan(plan, executed=yes)
 
 
 @app.command("verify-patch")
@@ -485,6 +621,7 @@ def _workflow_plan(
 
     from proofpatch.agents.registry import get_agent_adapter
 
+    validate_protected_configuration(config)
     agent_configuration = AgentConfiguration(
         command=config.agent.command,
         environment_allowlist=config.agent.environment_allowlist,
@@ -505,35 +642,6 @@ def _workflow_plan(
         )
     if not backend.doctor().healthy:
         raise ConfigurationError("Docker protected mode is unavailable")
-    if config.setup.readonly_secret_files:
-        raise ConfigurationError(
-            "Protected workflows do not support setup secret-file mounts",
-            remediation="Use agent environment allowlisting or remove readonly_secret_files.",
-        )
-    if config.runtime.dockerfile is not None or config.runtime.context != ".":
-        raise ConfigurationError(
-            "Protected workflows require a prebuilt immutable image; "
-            "Dockerfile builds are unsupported"
-        )
-    if config.runtime.platform != "linux/amd64":
-        raise ConfigurationError("Protected workflows currently support only linux/amd64 images")
-    configured_tmpfs = tuple((item.path, item.size_mb, item.exec) for item in config.runtime.tmpfs)
-    if configured_tmpfs not in {(), (("/tmp", 1024, False),)}:  # noqa: S108
-        raise ConfigurationError("Protected workflows support only the default hardened /tmp tmpfs")
-    if config.runtime.user != "1000:1000":
-        raise ConfigurationError("Protected workflows support only user 1000:1000")
-    if (
-        config.verification.fail_on_test_deletion
-        or config.verification.fail_on_skipped_test_addition
-    ):
-        raise ConfigurationError(
-            "Configured test-deletion and skipped-test enforcement is not implemented"
-        )
-    if config.apply.branch_prefix != "proofpatch/" or config.apply.stage_changes:
-        raise ConfigurationError(
-            "Protected workflows currently require branch_prefix=proofpatch/ "
-            "and stage_changes=false"
-        )
     broad_agent_network = (
         config.network.investigation == "bridge" or config.network.patch == "bridge"
     )
@@ -633,13 +741,38 @@ def _resolve_issue(
     return selected
 
 
-def _print_workflow_outcome(outcome: WorkflowOutcome) -> None:
+def _print_workflow_outcome(
+    outcome: WorkflowOutcome,
+    *,
+    json_output: bool = False,
+) -> None:
+    rejection_code = outcome.receipt.rejection_code if outcome.receipt is not None else None
+    if json_output:
+        typer.echo(
+            canonical_json_bytes(
+                {
+                    "protection_level": "protected",
+                    "receipt": str(outcome.receipt_json)
+                    if outcome.receipt_json is not None
+                    else None,
+                    "rejection_code": rejection_code,
+                    "run_id": outcome.run_id,
+                    "state": outcome.state.value,
+                    "verified": outcome.verified,
+                }
+            ).decode("utf-8")
+        )
+        if not outcome.verified:
+            if rejection_code in {"PP_AGENT_FAILED", "PP_AGENT_TIMEOUT"}:
+                raise AgentError(f"Agent workflow failed: {rejection_code}")
+            raise VerificationError(f"Patch was not verified: {rejection_code or 'unknown'}")
+        return
     typer.echo(f"Run: {outcome.run_id}")
     typer.echo(f"State: {outcome.state.value}")
     if outcome.receipt_json is not None:
         typer.echo(f"Receipt: {outcome.receipt_json}")
     if not outcome.verified:
-        code = outcome.receipt.rejection_code if outcome.receipt is not None else "unknown"
+        code = rejection_code or "unknown"
         if code in {"PP_AGENT_FAILED", "PP_AGENT_TIMEOUT"}:
             raise AgentError(f"Agent workflow failed: {code}")
         raise VerificationError(f"Patch was not verified: {code}")
@@ -665,3 +798,114 @@ def _print_status(status: RunStatus) -> None:
     typer.echo(f"Events: {status.event_count}")
     typer.echo(f"Final event hash: {status.final_event_hash}")
     typer.echo(f"Metadata index: {index_label}")
+
+
+def _print_doctor_report(report: DoctorReport) -> None:
+    for level in DiagnosticLevel:
+        typer.echo(f"{level.value}:")
+        matching = tuple(check for check in report.checks if check.level is level)
+        if not matching:
+            typer.echo("  (none)")
+        for check in matching:
+            typer.echo(f"  {check.name}: {check.message}")
+
+
+def _print_cleanup_plan(plan: RunCleanupPlan, *, executed: bool) -> None:
+    verb = "Cleaned" if executed else "Would clean"
+    targets = ", ".join(target.path.name for target in plan.targets) or "no disposable workspaces"
+    typer.echo(f"{verb} {plan.run_id} ({plan.state.value}): {targets}")
+
+
+def _parse_duration(value: str) -> timedelta:
+    matched = re.fullmatch(r"([1-9][0-9]*)([smhdw])", value)
+    if matched is None:
+        raise ConfigurationError("Duration must be a positive integer followed by s, m, h, d, or w")
+    amount = int(matched.group(1))
+    unit = matched.group(2)
+    seconds = amount * {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}[unit]
+    if seconds > 10 * 365 * 86400:
+        raise ConfigurationError("Cleanup duration cannot exceed ten years")
+    return timedelta(seconds=seconds)
+
+
+def _print_inspection_logs(coordinator: RunCoordinator, run_id: str, category: str) -> None:
+    paths = coordinator.paths_for(run_id)
+    roots = {
+        "investigation": paths.investigation,
+        "patch": paths.patch,
+        "verification": paths.verification,
+    }
+    root = roots.get(category)
+    if root is None:
+        raise ConfigurationError("Log category must be investigation, patch, or verification")
+    if not root.exists():
+        typer.echo(f"No persisted {category} logs found.")
+        return
+    validate_proofpatch_data_path(coordinator.directories.data, root)
+    logs: list[Path] = []
+    for directory, names, files in os.walk(
+        root,
+        topdown=True,
+        onerror=_raise_log_walk_error,
+        followlinks=False,
+    ):
+        parent = Path(directory)
+        for name in (*names, *files):
+            candidate = parent / name
+            try:
+                status = candidate.lstat()
+            except OSError as error:
+                raise ConfigurationError("Could not safely inspect persisted logs") from error
+            attributes = getattr(status, "st_file_attributes", 0)
+            reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            if stat.S_ISLNK(status.st_mode) or bool(attributes & reparse):
+                raise ConfigurationError("Persisted log tree contains an unsafe linked path")
+        logs.extend(parent / name for name in files if name.endswith(".log"))
+    if not logs:
+        typer.echo(f"No persisted {category} logs found.")
+        return
+    remaining = 8 * 1024 * 1024
+    for path in sorted(logs):
+        relative = path.relative_to(paths.root).as_posix()
+        content = _read_inspection_log(path, remaining)
+        remaining -= len(content)
+        typer.echo(f"== {relative} ==")
+        typer.echo(content.decode("utf-8", errors="replace"), nl=not content.endswith(b"\n"))
+
+
+def _read_inspection_log(path: Path, maximum_bytes: int) -> bytes:
+    if maximum_bytes <= 0:
+        raise ConfigurationError("Persisted logs exceed the 8 MiB inspection limit")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        current = path.lstat()
+        attributes = getattr(current, "st_file_attributes", 0)
+        reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or stat.S_ISLNK(current.st_mode)
+            or bool(attributes & reparse)
+            or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+        ):
+            raise ConfigurationError("Persisted log is not a private regular file")
+        content = bytearray()
+        while chunk := os.read(descriptor, min(64 * 1024, maximum_bytes + 1 - len(content))):
+            content.extend(chunk)
+            if len(content) > maximum_bytes:
+                raise ConfigurationError("Persisted logs exceed the 8 MiB inspection limit")
+        return bytes(content)
+    except ConfigurationError:
+        raise
+    except OSError as error:
+        raise ConfigurationError("Could not safely read a persisted log") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _raise_log_walk_error(error: OSError) -> None:
+    raise ConfigurationError("Could not safely inspect persisted logs") from error

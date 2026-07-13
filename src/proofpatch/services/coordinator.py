@@ -204,6 +204,42 @@ class RunCoordinator:
             )
             return event
 
+    def append_event_while_locked(
+        self,
+        run_id: str,
+        event_type: str,
+        repository_lock: RepositoryLock,
+        *,
+        payload: dict[str, JsonValue] | None = None,
+    ) -> EvidenceEvent:
+        """Append an event using a caller-held matching repository lock."""
+
+        paths = self._locate_run(_validated_run_id(run_id))
+        manifest = _read_manifest(paths)
+        if (
+            repository_lock.repository_id != manifest.repository_id
+            or repository_lock.run_id != manifest.run_id
+        ):
+            raise RepositoryError("Repository lock identity does not match the run")
+        repository_lock.assert_held()
+        current = self._verified_status(paths)
+        event = EvidenceWriter(paths.events, paths.chain, manifest.run_id).append(
+            event_type,
+            payload=payload,
+        )
+        self.store.upsert(
+            _make_record(
+                manifest,
+                current.state,
+                event.timestamp_utc,
+                event.sequence,
+                event.event_hash,
+                paths,
+                self.directories.data,
+            )
+        )
+        return event
+
     def inspect(self, run_id: str) -> RunStatus:
         """Return verified run details, including every event."""
 
