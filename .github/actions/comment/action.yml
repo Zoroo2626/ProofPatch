@@ -1,0 +1,46 @@
+name: ProofPatch PR comment
+description: Post a sanitized ProofPatch result from a separate least-privilege job.
+
+inputs:
+  token:
+    description: GITHUB_TOKEN from a job with pull-requests write permission.
+    required: true
+  repository:
+    description: Target owner/repository.
+    required: true
+  pull-request-number:
+    description: Target pull request number.
+    required: true
+  body:
+    description: Sanitized comment body emitted by the ProofPatch verification action.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Post ProofPatch result
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        PP_REPOSITORY: ${{ inputs.repository }}
+        PP_PULL_REQUEST_NUMBER: ${{ inputs.pull-request-number }}
+        PP_COMMENT_BODY: ${{ inputs.body }}
+      run: |
+        if [[ ! "$PP_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+          echo "Invalid GitHub repository identifier." >&2
+          exit 2
+        fi
+        if [[ ! "$PP_PULL_REQUEST_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+          echo "Invalid pull request number." >&2
+          exit 2
+        fi
+        if (( ${#PP_COMMENT_BODY} > 60000 )); then
+          echo "ProofPatch comment exceeds the size limit." >&2
+          exit 2
+        fi
+        gh api \
+          --method POST \
+          -H "X-GitHub-Api-Version: 2026-03-10" \
+          "/repos/${PP_REPOSITORY}/issues/${PP_PULL_REQUEST_NUMBER}/comments" \
+          --raw-field "body=${PP_COMMENT_BODY}" >/dev/null
+

@@ -1,0 +1,47 @@
+name: Docker E2E
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  protected-backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install test dependencies
+        run: python -m pip install --group dev -e .
+
+      - name: Run protected Docker smoke test
+        run: python -m pytest -m docker_e2e -q --no-cov
+
+      - name: Run Docker lifecycle and adversarial scenarios
+        run: >-
+          python -m pytest -q --no-cov
+          tests/unit/test_phase4_docker_policy.py
+          tests/integration/test_phase4_docker_backend.py
+          tests/integration/test_phase5_investigation_gate.py
+          tests/integration/test_phase6_generic_workflow.py
+
+      - name: Remove any labeled containers
+        if: always()
+        run: |
+          ids="$(docker ps -aq --filter label=org.proofpatch.managed=true)"
+          if [ -n "$ids" ]; then docker rm -f $ids; fi

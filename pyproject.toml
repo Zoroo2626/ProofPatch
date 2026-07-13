@@ -1,0 +1,115 @@
+[build-system]
+requires = ["setuptools>=80,<81"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "proofpatch"
+dynamic = ["version"]
+description = "An independent verification gate for AI-generated bug fixes."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+  { name = "ProofPatch contributors" },
+]
+keywords = ["verification", "git", "cli", "software-development"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Typing :: Typed",
+]
+dependencies = [
+  "typer>=0.16,<1",
+  "rich>=14,<15",
+  "pydantic>=2.11,<3",
+  "PyYAML>=6.0,<7",
+  "platformdirs>=4.3,<5",
+  "regex>=2024.11.6,<2027",
+]
+
+[dependency-groups]
+dev = [
+  "build>=1.2,<2",
+  "mypy>=1.16,<2",
+  "pytest>=8,<9",
+  "pytest-cov>=6,<7",
+  "pytest-timeout>=2.4,<3",
+  "ruff>=0.12,<1",
+  "twine>=6,<7",
+  "types-PyYAML>=6,<7",
+  "types-regex>=2024.11,<2027",
+]
+
+[project.scripts]
+proofpatch = "proofpatch.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "proofpatch.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+proofpatch = [
+  "py.typed",
+  "prompts/*.md",
+  "templates/*.j2",
+  "templates/*.yml",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "RUF", "S", "SIM", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101"]
+
+[tool.ruff.format]
+docstring-code-format = true
+line-ending = "lf"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests"]
+mypy_path = "src"
+pretty = true
+show_error_codes = true
+warn_unreachable = true
+
+[tool.pytest.ini_options]
+addopts = [
+  "--strict-config",
+  "--strict-markers",
+  "--cov=proofpatch",
+  "--cov-branch",
+  "--cov-report=term-missing",
+  "--cov-fail-under=90",
+]
+testpaths = ["tests"]
+timeout = 30
+markers = [
+  "docker_e2e: requires a live Linux Docker daemon and may pull a test image",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["proofpatch"]
+
+[tool.coverage.report]
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "if __name__ == .__main__.:",
+  "raise NotImplementedError",
+]
+show_missing = true
+skip_covered = true

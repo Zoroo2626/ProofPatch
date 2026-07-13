@@ -1,0 +1,123 @@
+name: ProofPatch deterministic verification
+description: Verify a failure-to-success transition and upload receipt-only evidence.
+author: ProofPatch contributors
+
+inputs:
+  baseline-command:
+    description: Command expected to fail at the baseline and pass after the patch.
+    required: true
+  patch-file:
+    description: Absolute or workspace-relative binary Git patch to verify.
+    required: true
+  repository:
+    description: Clean baseline repository directory.
+    required: false
+    default: .
+  regression-command:
+    description: Optional command that must pass after applying the patch.
+    required: false
+    default: ""
+  issue:
+    description: Bounded issue text; callers may pass the pull request or issue body.
+    required: true
+  timeout-seconds:
+    description: Timeout for each deterministic command.
+    required: false
+    default: "120"
+  output-mb:
+    description: Combined stdout and stderr limit per command.
+    required: false
+    default: "25"
+  artifact-name:
+    description: Name of the receipt-only workflow artifact.
+    required: false
+    default: proofpatch-receipt
+  retention-days:
+    description: Receipt artifact retention in days.
+    required: false
+    default: "14"
+
+outputs:
+  run-id:
+    description: ProofPatch run identifier.
+    value: ${{ steps.verify.outputs.run-id }}
+  verified:
+    description: Whether the required before-and-after transition was observed.
+    value: ${{ steps.verify.outputs.verified }}
+  comment-body:
+    description: Sanitized Markdown for an optional, separately privileged PR comment job.
+    value: ${{ steps.verify.outputs.comment-body }}
+  artifact-id:
+    description: GitHub artifact identifier.
+    value: ${{ steps.upload.outputs.artifact-id }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install the pinned ProofPatch action source
+      shell: bash
+      env:
+        PROOFPATCH_ACTION_PATH: ${{ github.action_path }}
+      run: python -m pip install --disable-pip-version-check "$PROOFPATCH_ACTION_PATH"
+
+    - name: Verify and stage receipts
+      id: verify
+      shell: bash
+      env:
+        PP_BASELINE_COMMAND: ${{ inputs.baseline-command }}
+        PP_PATCH_FILE: ${{ inputs.patch-file }}
+        PP_REPOSITORY: ${{ inputs.repository }}
+        PP_REGRESSION_COMMAND: ${{ inputs.regression-command }}
+        PP_ISSUE: ${{ inputs.issue }}
+        PP_TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
+        PP_OUTPUT_MB: ${{ inputs.output-mb }}
+      run: |
+        data_root="$(mktemp -d "${RUNNER_TEMP}/proofpatch-data.XXXXXXXX")"
+        artifact_parent="$(mktemp -d "${RUNNER_TEMP}/proofpatch-artifact.XXXXXXXX")"
+        artifact_root="${artifact_parent}/receipt"
+        export PROOFPATCH_DATA_DIR="$data_root"
+        args=(
+          verify-patch
+          --baseline-command "$PP_BASELINE_COMMAND"
+          --patch-file "$PP_PATCH_FILE"
+          --repository "$PP_REPOSITORY"
+          --issue-summary "$PP_ISSUE"
+          --timeout-seconds "$PP_TIMEOUT_SECONDS"
+          --output-mb "$PP_OUTPUT_MB"
+          --github-artifact-directory "$artifact_root"
+          --github-summary-file "$GITHUB_STEP_SUMMARY"
+          --github-output-file "$GITHUB_OUTPUT"
+        )
+        if [[ -n "$PP_REGRESSION_COMMAND" ]]; then
+          args+=(--regression-command "$PP_REGRESSION_COMMAND")
+        fi
+        set +e
+        python -m proofpatch "${args[@]}"
+        verification_exit_code=$?
+        set -e
+        echo "verification-exit-code=$verification_exit_code" >> "$GITHUB_OUTPUT"
+
+    - name: Upload verified receipt files only
+      id: upload
+      if: ${{ steps.verify.outputs.receipt-json != '' }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: |
+          ${{ steps.verify.outputs.receipt-json }}
+          ${{ steps.verify.outputs.receipt-markdown }}
+        if-no-files-found: error
+        retention-days: ${{ inputs.retention-days }}
+
+    - name: Enforce the verification result
+      if: ${{ steps.verify.outputs.verified != 'true' }}
+      shell: bash
+      env:
+        VERIFICATION_EXIT_CODE: ${{ steps.verify.outputs.verification-exit-code }}
+      run: |
+        echo "ProofPatch did not verify the required transition." >&2
+        exit "${VERIFICATION_EXIT_CODE:-1}"
+
+branding:
+  icon: shield
+  color: purple

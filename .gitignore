@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.coverage
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+build/
+dist/
+htmlcov/
+
+# Local environment files commonly contain credentials.
+.env
+.env.*
+!.env.example
+
+# Local ProofPatch state must never be committed.
+.proofpatch/
+
+# Editors and operating systems.
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

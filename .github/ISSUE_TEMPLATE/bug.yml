@@ -1,0 +1,41 @@
+name: Bug report
+description: Report reproducible incorrect behavior in ProofPatch.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials, private source code, or other sensitive data.
+  - type: input
+    id: version
+    attributes:
+      label: ProofPatch version
+      placeholder: Output of proofpatch --version
+    validations:
+      required: true
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Include the expected result and the actual result.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide sanitized steps that reproduce the problem.
+    validations:
+      required: true

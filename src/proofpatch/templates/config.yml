@@ -1,0 +1,90 @@
+# ProofPatch protected workflow configuration (generic adapter example).
+schema_version: 1
+
+project:
+  name: example-project
+
+mode: protected
+
+repository:
+  require_clean: true
+  allow_submodules: false
+  allow_git_lfs: false
+  maximum_size_mb: 2048
+  allowed_patch_paths: ["**"]
+  denied_patch_paths: [".git/**", ".proofpatch/**", "proofpatch.yml"]
+  maximum_changed_files: 100
+  maximum_patch_size_mb: 20
+
+runtime:
+  image: "replace-with-a-local-or-registry-image"
+  dockerfile: null
+  context: "."
+  platform: "linux/amd64"
+  working_directory: "/workspace"
+  user: "1000:1000"
+  read_only_root: true
+  tmpfs:
+    - path: "/tmp"
+      size_mb: 1024
+      exec: false
+  limits:
+    timeout_seconds: 1800.0
+    memory_mb: 4096
+    cpus: 2.0
+    pids: 512
+    output_mb: 25
+
+network:
+  setup: bridge
+  investigation: bridge
+  patch: bridge
+  baseline: none
+  verification: none
+
+setup:
+  commands: []
+  environment: {}
+  readonly_secret_files: []
+
+agent:
+  adapter: generic
+  image: null
+  command: ["my-agent", "--non-interactive", "--prompt-file", "{prompt_path}"]
+  environment_allowlist: []
+  maximum_attempts: 1
+  investigation_timeout_seconds: 1200.0
+  patch_timeout_seconds: 1800.0
+
+issue:
+  source: inline
+  text: null
+
+oracles:
+  reproduction:
+    source: agent-contract
+    required: true
+  regressions: []
+
+verification:
+  require_baseline_failure: true
+  require_reproduction_transition: true
+  require_all_regressions: true
+  fail_on_contract_change: true
+  flag_test_changes: true
+  fail_on_test_deletion: false
+  fail_on_skipped_test_addition: false
+
+evidence:
+  retain_workspaces: false
+  retain_logs: true
+  redact_environment_values: true
+  maximum_log_mb: 25
+
+apply:
+  require_clean_original: true
+  require_same_head: true
+  create_branch: true
+  branch_prefix: "proofpatch/"
+  stage_changes: false
+  commit: false
