@@ -1,6 +1,8 @@
 """Central, deterministic Docker argv construction for protected execution."""
 
 import hashlib
+import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,7 +31,12 @@ class DockerCommandBuilder:
     def __init__(self, executable: Path) -> None:
         self.executable = executable
 
-    def build(self, request: ExecutionRequest) -> DockerCommand:
+    def build(
+        self,
+        request: ExecutionRequest,
+        *,
+        environment_file: Path | None = None,
+    ) -> DockerCommand:
         mounts = validate_mounts(
             request.mounts,
             phase=request.phase,
@@ -78,9 +85,10 @@ class DockerCommandBuilder:
                     f"{tmpfs.path}:rw,noexec,nosuid,nodev,size={tmpfs.size_mb}m",
                 )
             )
-        for name_key in sorted(request.environment):
-            # Docker reads the value from the tightly controlled CLI environment. It is never argv.
-            argv.extend(("--env", name_key))
+        if request.environment:
+            argv.extend(("--env-file", str(_validate_environment_file(environment_file))))
+        elif environment_file is not None:
+            raise ConfigurationError("An environment file was supplied without container values")
         for mount in sorted(mounts, key=lambda item: item.destination):
             source = str(mount.source.resolve(strict=True))
             if "," in source:
@@ -117,3 +125,26 @@ def _docker_network(network: NetworkPolicy) -> str:
 
 def _format_cpus(value: float) -> str:
     return format(value, ".12g")
+
+
+def _validate_environment_file(path: Path | None) -> Path:
+    if path is None:
+        raise ConfigurationError("Container environment requires a private environment file")
+    try:
+        status = path.lstat()
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise ConfigurationError("Container environment file is unavailable") from error
+    attributes = getattr(status, "st_file_attributes", 0)
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    if (
+        not stat.S_ISREG(status.st_mode)
+        or status.st_nlink != 1
+        or path.is_symlink()
+        or path.is_junction()
+        or bool(attributes & reparse)
+    ):
+        raise ConfigurationError("Container environment file is not a private regular file")
+    if os.name != "nt" and status.st_mode & 0o077:
+        raise ConfigurationError("Container environment file permissions are too broad")
+    return resolved

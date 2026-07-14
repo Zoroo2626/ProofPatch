@@ -13,7 +13,12 @@ import proofpatch.cli as cli
 from proofpatch.backends.docker import DockerBackend
 from proofpatch.cli import app
 from proofpatch.errors import AgentError, ConfigurationError, VerificationError
-from proofpatch.models.config import ProofPatchConfig, discover_configuration, load_configuration
+from proofpatch.models.config import (
+    ProofPatchConfig,
+    SetupCommandConfig,
+    discover_configuration,
+    load_configuration,
+)
 from proofpatch.models.execution import (
     BackendDoctorResult,
     CommandOracleSpec,
@@ -43,7 +48,7 @@ runtime:
     pids: 64
     output_mb: 2
 network:
-  setup: bridge
+  setup: none
   investigation: bridge
   patch: bridge
   baseline: none
@@ -419,6 +424,24 @@ def test_security_relevant_unsupported_configuration_fails_preflight(tmp_path: P
         ),
         loaded.model_copy(
             update={"setup": loaded.setup.model_copy(update={"readonly_secret_files": ("token",)})}
+        ),
+        loaded.model_copy(
+            update={"network": loaded.network.model_copy(update={"setup": "bridge"})}
+        ),
+        loaded.model_copy(
+            update={
+                "setup": loaded.setup.model_copy(
+                    update={
+                        "commands": (
+                            SetupCommandConfig(
+                                id="install",
+                                argv=("python", "install.py"),
+                                timeout_seconds=30.0,
+                            ),
+                        )
+                    }
+                )
+            }
         ),
     )
     for variant in variants:

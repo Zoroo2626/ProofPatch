@@ -1,1 +1,34 @@
-# The Node.js example configuration is intentionally deferred to its implementation phase.
+# Replace the image with an immutable Node verifier image containing project dependencies.
+schema_version: 1
+project:
+  name: node-project
+mode: protected
+runtime:
+  image: "replace-with-node-verifier-image"
+network:
+  setup: none
+  investigation: bridge
+  patch: bridge
+  baseline: none
+  verification: none
+setup:
+  commands: []
+  environment: {}
+  readonly_secret_files: []
+agent:
+  adapter: generic
+  command: ["my-agent", "--non-interactive", "--prompt-file", "{prompt_path}"]
+  environment_allowlist: []
+oracles:
+  reproduction:
+    source: agent-contract
+    required: true
+  regressions:
+    - id: tests
+      type: command
+      argv: ["npm", "test"]
+      cwd: "."
+      timeout_seconds: 1200.0
+      environment: {}
+      expect:
+        exit_code: 0

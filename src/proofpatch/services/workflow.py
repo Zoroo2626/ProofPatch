@@ -5,6 +5,7 @@ import os
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 from pydantic import ValidationError
 
@@ -34,6 +35,7 @@ from proofpatch.models.attempt import (
 )
 from proofpatch.models.common import JsonValue, format_utc_timestamp
 from proofpatch.models.contract import FailureContract
+from proofpatch.models.environment import VerifierEnvironmentIdentity
 from proofpatch.models.execution import (
     ENVIRONMENT_NAME,
     CommandOracleSpec,
@@ -66,9 +68,15 @@ from proofpatch.models.run import RunPaths
 from proofpatch.models.state import VALID_TRANSITIONS, RunState
 from proofpatch.oracles.base import OracleExecutionResult
 from proofpatch.oracles.command import CommandOracle
+from proofpatch.security.workspace import workspace_content_sha256
 from proofpatch.services.cleanup import remove_owned_tree
 from proofpatch.services.contracts import ContractService
 from proofpatch.services.coordinator import RunCoordinator
+from proofpatch.services.environment import (
+    build_verifier_environment_identity,
+    merge_verifier_environment,
+    verify_verifier_environment_identity,
+)
 from proofpatch.services.evidence import (
     canonical_json_bytes,
     read_canonical_json,
@@ -125,7 +133,7 @@ class WorkflowPlan:
     project_name: str | None = None
     investigation_network: NetworkPolicy = NetworkPolicy.AGENT_API
     patch_network: NetworkPolicy = NetworkPolicy.AGENT_API
-    setup_network: NetworkPolicy = NetworkPolicy.BRIDGE
+    setup_network: NetworkPolicy = NetworkPolicy.NONE
 
     def __post_init__(self) -> None:
         adapter = get_agent_adapter(self.adapter_name)
@@ -146,8 +154,12 @@ class WorkflowPlan:
                 ENVIRONMENT_NAME.fullmatch(name) is None for name in environment
             ):
                 raise ValueError("Workflow environment contains invalid or excessive names")
-            if any("\0" in item for pair in environment.items() for item in pair):
-                raise ValueError("Workflow environment must be NUL-free")
+            if any(
+                "\0" in item or "\r" in item or "\n" in item
+                for pair in environment.items()
+                for item in pair
+            ):
+                raise ValueError("Workflow environment must be NUL-free and single-line")
         if any(spec.baseline_expectation is not None for spec in self.regressions):
             raise ValueError("Regression oracles cannot contain reproduction expectations")
         identifiers = [spec.id for spec in self.regressions]
@@ -155,6 +167,16 @@ class WorkflowPlan:
             raise ValueError("Workflow supports at most 128 setup commands and regressions")
         if len(identifiers) != len(set(identifiers)):
             raise ValueError("Regression oracle IDs must be unique")
+        if (
+            self.setup_commands
+            or self.setup_environment
+            or self.setup_network is not NetworkPolicy.NONE
+        ):
+            raise ValueError(
+                "protected setup is unsupported; bake dependencies into the immutable image"
+            )
+        if self.verifier_image.os != "linux" or self.verifier_image.architecture != "amd64":
+            raise ValueError("Protected verification requires a linux/amd64 verifier image")
         if self.project_name is not None and not self.project_name.strip():
             raise ValueError("Project name cannot be blank")
         if (
@@ -278,6 +300,8 @@ class WorkflowService:
                 contract_environment_allowlist=plan.contract_environment_allowlist,
                 setup_commands=plan.setup_commands,
                 setup_environment=plan.setup_environment,
+                regressions=plan.regressions,
+                maximum_repository_bytes=plan.maximum_repository_bytes,
                 investigation_network=plan.investigation_network,
                 setup_network=plan.setup_network,
                 adapter_name=adapter.name,
@@ -468,7 +492,9 @@ class WorkflowService:
             return
         if isinstance(error, (KeyboardInterrupt, SystemExit)):
             target: RunState | None = None
-        elif isinstance(error, BackendError) or not isinstance(error, ProofPatchError):
+        elif isinstance(error, (BackendError, EvidenceIntegrityError)) or not isinstance(
+            error, ProofPatchError
+        ):
             target = RunState.ERROR
         else:
             target = None
@@ -930,6 +956,10 @@ class WorkflowService:
             "oracle.started",
             payload={"oracle_id": spec.id, "phase": phase.value},
         )
+        source_before = workspace_content_sha256(
+            workspace,
+            maximum_bytes=plan.maximum_repository_bytes,
+        )
         process, assessment = self._run_container(
             run_id,
             plan,
@@ -944,6 +974,17 @@ class WorkflowService:
             environment_allowlist,
             working_directory=_container_cwd(spec.cwd),
         )
+        source_after = workspace_content_sha256(
+            workspace,
+            maximum_bytes=plan.maximum_repository_bytes,
+        )
+        if source_after != source_before:
+            self.coordinator.append_event(
+                run_id,
+                "oracle.source_mutation_detected",
+                payload={"oracle_id": spec.id, "phase": phase.value},
+            )
+            raise EvidenceIntegrityError("Verification oracle modified its read-only source")
         paths = self.coordinator.paths_for(run_id)
         log_directory = paths.verification / execution_id
         log_directory.mkdir(mode=0o700, exist_ok=False)
@@ -991,6 +1032,9 @@ class WorkflowService:
     ) -> tuple[ProcessOutcome, ProtectionAssessment]:
         paths = self.coordinator.paths_for(run_id)
         snapshot = self.patching.load_repository(run_id)
+        if phase is ExecutionPhase.VERIFICATION:
+            environment = merge_verifier_environment(environment)
+            environment_allowlist = tuple(sorted(set(environment_allowlist).union(environment)))
         mounts = [
             DockerMount(
                 source=workspace,
@@ -1138,6 +1182,15 @@ class WorkflowService:
             raise EvidenceIntegrityError("A protected receipt requires measured protection facts")
         status = self.coordinator.status(run_id)
         snapshot = self.patching.load_repository(run_id)
+        try:
+            environment_identity = VerifierEnvironmentIdentity.model_validate(
+                read_canonical_json(self.coordinator.paths_for(run_id).environment_identity)
+            )
+        except ValidationError as error:
+            raise EvidenceIntegrityError(
+                "Protected verifier environment identity is invalid"
+            ) from error
+        verify_verifier_environment_identity(environment_identity)
         receipt = VerificationReceipt(
             proofpatch_version=__version__,
             run_id=run_id,
@@ -1175,6 +1228,7 @@ class WorkflowService:
                 regressions_passed=regressions_passed,
                 oracles=tuple(evaluations),
             ),
+            environment=environment_identity,
             evidence=ReceiptEvidence(decision_chain_hash=status.final_event_hash),
             rejection_code=rejection_code,
             attempts=tuple(
@@ -1266,8 +1320,18 @@ class WorkflowService:
     def _validate_environment_identity(self, run_id: str, plan: WorkflowPlan) -> None:
         status = self.coordinator.status(run_id)
         paths = self.coordinator.paths_for(run_id)
-        if read_canonical_json(paths.workflow_plan) != self._plan_evidence(plan):
+        plan_document = read_canonical_json(paths.workflow_plan)
+        if plan_document != self._plan_evidence(plan):
             raise EvidenceIntegrityError("Resolved workflow configuration changed after preflight")
+        configuration_events = [
+            event for event in status.events if event.type == "configuration.resolved"
+        ]
+        if (
+            len(configuration_events) != 1
+            or configuration_events[0].payload.get("sha256")
+            != hashlib.sha256(canonical_json_bytes(plan_document)).hexdigest()
+        ):
+            raise EvidenceIntegrityError("Resolved workflow configuration is not event-bound")
         expected_agent = plan.agent_image.digest
         expected_verifier = plan.verifier_image.digest
         for event in status.events:
@@ -1278,8 +1342,38 @@ class WorkflowService:
                 or event.payload.get("verifier_image_digest") != expected_verifier
             ):
                 raise EvidenceIntegrityError("Resolved image digest changed after investigation")
-            return
-        raise EvidenceIntegrityError("Run has no image identity evidence")
+            break
+        else:
+            raise EvidenceIntegrityError("Run has no image identity evidence")
+        try:
+            identity = VerifierEnvironmentIdentity.model_validate(
+                read_canonical_json(paths.environment_identity)
+            )
+            contract = FailureContract.model_validate(read_canonical_json(paths.submitted_contract))
+        except ValidationError as error:
+            raise EvidenceIntegrityError(
+                "Stored verifier environment identity is invalid"
+            ) from error
+        verify_verifier_environment_identity(identity)
+        snapshot = self.patching.load_repository(run_id)
+        expected_identity = build_verifier_environment_identity(
+            self.patching.git,
+            snapshot,
+            plan.verifier_image,
+            contract.oracle.as_command_spec(),
+            plan.regressions,
+        )
+        if identity != expected_identity:
+            raise EvidenceIntegrityError("Verifier environment inputs changed after baseline")
+        environment_events = [
+            event for event in status.events if event.type == "environment.prepared"
+        ]
+        if (
+            len(environment_events) != 1
+            or environment_events[0].payload.get("environment_inputs_sha256")
+            != identity.environment_inputs_sha256
+        ):
+            raise EvidenceIntegrityError("Verifier environment identity is not event-bound")
 
     def _capture_patch_result(
         self,
@@ -1383,8 +1477,8 @@ class WorkflowService:
     def _plan_evidence(plan: WorkflowPlan) -> dict[str, JsonValue]:
         """Serialize deterministic settings and secret names, never secret values."""
 
-        setup_environment: dict[str, JsonValue] = dict(plan.setup_environment)
         adapter = get_agent_adapter(plan.adapter_name)
+        setup_environment_names = [cast(JsonValue, name) for name in sorted(plan.setup_environment)]
         return {
             "schema_version": 1,
             "adapter": adapter.name,
@@ -1405,7 +1499,10 @@ class WorkflowService:
                 }
                 for command in plan.setup_commands
             ],
-            "setup_environment": setup_environment,
+            "setup_environment_names": setup_environment_names,
+            "setup_environment_sha256": hashlib.sha256(
+                canonical_json_bytes(plan.setup_environment)
+            ).hexdigest(),
             "regressions": [spec.model_dump(mode="json") for spec in plan.regressions],
             "allowed_patch_paths": list(plan.allowed_patch_paths),
             "denied_patch_paths": list(plan.denied_patch_paths),

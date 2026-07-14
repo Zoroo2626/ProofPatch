@@ -5,6 +5,7 @@ from typing import Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from proofpatch.models.common import RepositoryId, RunId, Sha256, validate_utc_timestamp
+from proofpatch.models.environment import VerifierEnvironmentIdentity
 from proofpatch.models.execution import OracleEvaluation, ProtectionAssessment, ProtectionLevel
 from proofpatch.models.patch import GitObjectId
 
@@ -95,6 +96,7 @@ class VerificationReceipt(BaseModel):
     baseline: ReceiptBaseline
     patch: ReceiptPatch | None
     verification: ReceiptVerification
+    environment: VerifierEnvironmentIdentity | None = None
     evidence: ReceiptEvidence
     rejection_code: str | None = None
     attempts: tuple[ReceiptAttempt, ...] = ()
@@ -124,6 +126,7 @@ class VerificationReceipt(BaseModel):
                 or self.protection_assessment is None
                 or self.protection_assessment.level is not ProtectionLevel.PROTECTED
                 or self.protection_assessment.failures
+                or self.environment is None
             ):
                 raise ValueError(
                     "protected receipts require a successful Docker protection assessment"

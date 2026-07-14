@@ -1,1 +1,1 @@
-"""Security-policy validation is deferred to later phases."""
+"""Compatibility namespace; active security checks live in the sibling policy modules."""

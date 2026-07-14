@@ -6,11 +6,14 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
+import proofpatch.cli as cli
 from proofpatch.agents.base import AgentConfiguration
 from proofpatch.errors import (
     AgentError,
     AgentTimeoutError,
+    ContractError,
     EvidenceIntegrityError,
     VerificationError,
 )
@@ -36,6 +39,7 @@ from proofpatch.models.execution import (
     TerminationKind,
 )
 from proofpatch.models.state import RunState
+from proofpatch.services.cleanup import RunCleanupService
 from proofpatch.services.coordinator import RunCoordinator
 from proofpatch.services.data_directories import ApplicationDirectories
 from proofpatch.services.evidence import read_canonical_json, write_canonical_json
@@ -98,6 +102,10 @@ class FakeAgentBackend:
             (output / "failure-contract.json").write_text(json.dumps(_contract()), encoding="utf-8")
         elif request.phase is ExecutionPhase.BASELINE:
             assert mounts[MountKind.WORKSPACE].access is MountAccess.READ_ONLY
+            if self.mode == "mutate-baseline":
+                (mounts[MountKind.WORKSPACE].source / "source.txt").write_text(
+                    "mutated by baseline\n", encoding="utf-8"
+                )
             exit_code = 1
             stdout = b"ReportedError\n"
         elif request.phase is ExecutionPhase.PATCH:
@@ -142,6 +150,10 @@ class FakeAgentBackend:
                 timed_out = True
         elif request.phase is ExecutionPhase.VERIFICATION:
             assert mounts[MountKind.WORKSPACE].access is MountAccess.READ_ONLY
+            if self.mode == "mutate-final" and "fixed-oracle" in request.execution_id:
+                (mounts[MountKind.WORKSPACE].source / "source.txt").write_text(
+                    "mutated by verification\n", encoding="utf-8"
+                )
             if self.mode == "interrupt-verification" and request.execution_id == "fixed-oracle":
                 raise KeyboardInterrupt
             if request.execution_id == "fixed-oracle":
@@ -296,6 +308,9 @@ def _service(
     _git(git, repository, "config", "user.name", "ProofPatch Test")
     _git(git, repository, "config", "user.email", "proofpatch@example.invalid")
     (repository / "source.txt").write_text("broken\n", encoding="utf-8")
+    (repository / "package-lock.json").write_text(
+        '{"lockfileVersion":3,"packages":{}}\n', encoding="utf-8"
+    )
     _git(git, repository, "add", "-A", "--")
     _git(git, repository, "commit", "-m", "baseline")
     coordinator = RunCoordinator(ApplicationDirectories(tmp_path / "data"))
@@ -316,6 +331,13 @@ def test_successful_fix_completes_full_lifecycle_and_receipt_integrity(tmp_path:
     assert outcome.receipt.protection_level is ProtectionLevel.PROTECTED
     assert outcome.receipt.verification.reproduction_transition_passed
     assert outcome.receipt.verification.regressions_passed
+    assert outcome.receipt.environment is not None
+    assert outcome.receipt.environment.base_image_digest == DIGEST
+    assert outcome.receipt.environment.network.baseline == "none"
+    assert outcome.receipt.environment.network.verification == "none"
+    assert [item.path for item in outcome.receipt.environment.dependency_lockfiles] == [
+        "package-lock.json"
+    ]
     assert outcome.receipt_json is not None and outcome.receipt_json.is_file()
     assert outcome.receipt_markdown is not None and outcome.receipt_markdown.is_file()
     assert service.coordinator.status(outcome.run_id).state is RunState.VERIFIED
@@ -329,6 +351,13 @@ def test_successful_fix_completes_full_lifecycle_and_receipt_integrity(tmp_path:
         ExecutionPhase.VERIFICATION,
         ExecutionPhase.VERIFICATION,
     ]
+    verifier_requests = [
+        request
+        for request in backend.requests
+        if request.phase in {ExecutionPhase.BASELINE, ExecutionPhase.VERIFICATION}
+    ]
+    assert len({request.execution_id for request in verifier_requests}) == len(verifier_requests)
+    assert all(request.tmpfs[0].path == "/tmp" for request in verifier_requests)  # noqa: S108
     resumed = service.resume(outcome.run_id, _plan())
     assert resumed.receipt == outcome.receipt
     assert service.receipts.verify(outcome.run_id) == outcome.receipt
@@ -400,6 +429,7 @@ def test_second_attempt_starts_fresh_and_receipt_contains_timeline(tmp_path: Pat
     markdown = outcome.receipt_markdown.read_text(encoding="utf-8")
     assert "## Attempt Timeline" in markdown
     assert "PP_REPRODUCTION_STILL_FAILS" in markdown
+    assert service.receipts.verify(outcome.run_id) == outcome.receipt
 
 
 def test_repeated_patch_is_flagged_and_maximum_attempts_are_enforced(tmp_path: Path) -> None:
@@ -493,8 +523,6 @@ def test_interrupted_patch_requires_confirmation_before_resume(tmp_path: Path) -
 
     with pytest.raises(AgentError, match="explicit confirmation"):
         service.resume(run_id, _plan())
-    with pytest.raises(EvidenceIntegrityError, match="configuration changed"):
-        service.resume(run_id, replace(_plan(), project_name="changed"))
     resumed = service.resume(run_id, _plan(), capture_surviving_patch=True)
     assert resumed.verified
 
@@ -549,11 +577,128 @@ def test_unexpected_workflow_failure_records_error_and_cleans_workspace(tmp_path
     assert backend.cleaned == backend.terminated
 
 
-def test_final_setup_failure_is_rejected_with_receipt(tmp_path: Path) -> None:
-    service, _backend, _patching, repository = _service(tmp_path, "final-setup-failure")
-    outcome = service.run(repository, "Reported failure", _plan(setup=True))
+def test_workflow_rejects_setup_before_any_protected_execution() -> None:
+    with pytest.raises(ValueError, match="protected setup is unsupported"):
+        _plan(setup=True)
+
+
+def test_verifier_image_platform_mismatch_is_rejected_before_execution() -> None:
+    incompatible = _image().model_copy(update={"architecture": "arm64"})
+    with pytest.raises(ValueError, match="linux/amd64"):
+        replace(_plan(), verifier_image=incompatible)
+
+
+def test_resume_rejects_changed_image_and_network_inputs(tmp_path: Path) -> None:
+    service, _backend, _patching, repository = _service(tmp_path, "success")
+    outcome = service.run(repository, "Reported failure", _plan())
+    changed_digest = "sha256:" + "e" * 64
+    changed_image = ResolvedImage(
+        requested_reference="example/runtime:latest",
+        immutable_reference=f"example/runtime@{changed_digest}",
+        digest=changed_digest,
+        image_id="sha256:" + "f" * 64,
+        architecture="amd64",
+    )
+    with pytest.raises(EvidenceIntegrityError, match="configuration changed"):
+        service.resume(outcome.run_id, replace(_plan(), verifier_image=changed_image))
+    with pytest.raises(EvidenceIntegrityError, match="configuration changed"):
+        service.resume(
+            outcome.run_id,
+            replace(_plan(), patch_network=NetworkPolicy.NONE),
+        )
+
+
+@pytest.mark.parametrize(
+    ("mode", "error_type", "message"),
+    [
+        ("mutate-baseline", ContractError, "Baseline oracle modified"),
+        ("mutate-final", EvidenceIntegrityError, "Verification oracle modified"),
+    ],
+)
+def test_oracle_source_mutation_fails_closed(
+    tmp_path: Path,
+    mode: str,
+    error_type: type[Exception],
+    message: str,
+) -> None:
+    service, _backend, _patching, repository = _service(tmp_path, mode)
+    with pytest.raises(error_type, match=message):
+        service.run(repository, "Reported failure", _plan())
+    assert service.coordinator.list_runs()[0].state is RunState.ERROR
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("prepared_environment_sha256", "f" * 64),
+        ("environment_inputs_sha256", "e" * 64),
+        ("base_image_id", "sha256:" + "e" * 64),
+        ("platform", "linux/arm64"),
+    ],
+)
+def test_receipt_rejects_environment_identity_tampering(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    service, _backend, _patching, repository = _service(tmp_path, "success")
+    outcome = service.run(repository, "Reported failure", _plan())
+    paths = service.coordinator.paths_for(outcome.run_id)
+    identity = read_canonical_json(paths.environment_identity)
+    assert isinstance(identity, dict)
+    identity[field] = value
+    write_canonical_json(paths.environment_identity, identity, exclusive=False)
+    with pytest.raises(EvidenceIntegrityError, match="environment"):
+        service.receipts.verify(outcome.run_id)
+
+
+@pytest.mark.parametrize("target", ["lockfile", "network"])
+def test_receipt_rejects_dependency_or_network_identity_tampering(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    service, _backend, _patching, repository = _service(tmp_path, "success")
+    outcome = service.run(repository, "Reported failure", _plan())
+    paths = service.coordinator.paths_for(outcome.run_id)
+    identity = read_canonical_json(paths.environment_identity)
+    assert isinstance(identity, dict)
+    if target == "lockfile":
+        lockfiles = identity["dependency_lockfiles"]
+        assert isinstance(lockfiles, list) and isinstance(lockfiles[0], dict)
+        lockfiles[0]["sha256"] = "f" * 64
+    else:
+        network = identity["network"]
+        assert isinstance(network, dict)
+        network["verification"] = "bridge"
+    write_canonical_json(paths.environment_identity, identity, exclusive=False)
+    with pytest.raises(EvidenceIntegrityError, match="environment"):
+        service.receipts.verify(outcome.run_id)
+
+
+@pytest.mark.parametrize("target", ["baseline", "final", "asset"])
+def test_receipt_rejects_oracle_or_asset_tampering(tmp_path: Path, target: str) -> None:
+    service, _backend, _patching, repository = _service(tmp_path, "success")
+    outcome = service.run(repository, "Reported failure", _plan())
     assert outcome.receipt is not None
-    assert outcome.receipt.rejection_code == "PP_SETUP_FAILED"
+    paths = service.coordinator.paths_for(outcome.run_id)
+    if target == "baseline":
+        document = read_canonical_json(paths.baseline_result)
+        assert isinstance(document, dict)
+        process = document["process"]
+        assert isinstance(process, dict) and isinstance(process["duration_ms"], int)
+        process["duration_ms"] += 1
+        write_canonical_json(paths.baseline_result, document, exclusive=False)
+    elif target == "final":
+        evaluation = outcome.receipt.verification.oracles[0]
+        result_path = paths.root / Path(evaluation.process.stdout_path).parent / "result.json"
+        document = read_canonical_json(result_path)
+        assert isinstance(document, dict)
+        document["passed"] = not evaluation.passed
+        write_canonical_json(result_path, document, exclusive=False)
+    else:
+        (paths.reproduction_assets / "reproduce.py").write_bytes(b"tampered")
+    with pytest.raises(EvidenceIntegrityError):
+        service.receipts.verify(outcome.run_id)
 
 
 def test_receipt_tampering_blocks_apply(tmp_path: Path) -> None:
@@ -570,6 +715,27 @@ def test_receipt_tampering_blocks_apply(tmp_path: Path) -> None:
         patching.apply_verified(outcome.run_id)
     with pytest.raises(EvidenceIntegrityError, match="binding"):
         service.resume(outcome.run_id, _plan())
+
+
+def test_positive_terminal_state_requires_receipt_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _backend, _patching, repository = _service(tmp_path, "success")
+    outcome = service.run(repository, "Reported failure", _plan())
+    paths = service.coordinator.paths_for(outcome.run_id)
+    paths.receipt_json.unlink()
+    paths.receipt_markdown.unlink()
+
+    with pytest.raises(EvidenceIntegrityError, match="receipt JSON"):
+        service.receipts.verify(outcome.run_id)
+    with pytest.raises(EvidenceIntegrityError, match="receipt JSON"):
+        RunCleanupService(service.coordinator).preview(outcome.run_id)
+    monkeypatch.setattr(cli, "_coordinator", lambda: service.coordinator)
+    for command in ("status", "inspect"):
+        result = CliRunner().invoke(cli.app, [command, outcome.run_id])
+        assert result.exit_code != 0
+        assert isinstance(result.exception, EvidenceIntegrityError)
+        assert "receipt JSON" in str(result.exception)
 
 
 def test_receipt_verification_reconciles_resolved_image_identity(tmp_path: Path) -> None:

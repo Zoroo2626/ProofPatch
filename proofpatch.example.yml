@@ -1,4 +1,5 @@
 # ProofPatch protected workflow configuration (generic adapter example).
+# The runtime image must already contain every dependency needed by the oracles.
 schema_version: 1
 
 project:
@@ -36,7 +37,7 @@ runtime:
     output_mb: 25
 
 network:
-  setup: bridge
+  setup: none
   investigation: bridge
   patch: bridge
   baseline: none

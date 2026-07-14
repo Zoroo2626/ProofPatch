@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from proofpatch.backends.docker import _container_environment_file
 from proofpatch.errors import ConfigurationError
 from proofpatch.execution.docker_command import DockerCommandBuilder
 from proofpatch.models.execution import (
@@ -111,7 +112,10 @@ def test_builder_enforces_every_required_restriction_and_redacts_environment(
         environment={"API_TOKEN": "super-secret-value"},
         allowlist=("API_TOKEN",),
     )
-    command = DockerCommandBuilder(Path("docker")).build(request)
+    with _container_environment_file(request.environment) as environment_file:
+        command = DockerCommandBuilder(Path("docker")).build(
+            request, environment_file=environment_file
+        )
 
     assert command.argv[:3] == ("docker", "run", "--rm")
     assert "--read-only" in command.argv
@@ -126,22 +130,34 @@ def test_builder_enforces_every_required_restriction_and_redacts_environment(
     assert "--privileged" not in command.argv
     assert "--pid=host" not in command.argv
     assert "super-secret-value" not in command.argv
-    assert command.argv[command.argv.index("--env") + 1] == "API_TOKEN"
+    assert "--env" not in command.argv
+    assert command.argv[command.argv.index("--env-file") + 1] == str(environment_file)
     assert request.image.immutable_reference in command.argv
     workspace_option = next(item for item in command.argv if "dst=/workspace" in item)
     assert workspace_option.endswith(",readonly")
     assert all(label in command.argv for label in command.labels)
 
 
-def test_environment_keys_are_sorted_deterministically(tmp_path: Path) -> None:
-    request = _request(
-        tmp_path,
-        environment={"Z_TOKEN": "long-secret-z", "A_TOKEN": "long-secret-a"},
-        allowlist=("Z_TOKEN", "A_TOKEN"),
-    )
-    command = DockerCommandBuilder(Path("docker")).build(request)
-    positions = [index for index, item in enumerate(command.argv) if item == "--env"]
-    assert [command.argv[index + 1] for index in positions] == ["A_TOKEN", "Z_TOKEN"]
+def test_environment_keys_are_sorted_deterministically() -> None:
+    with _container_environment_file(
+        {"Z_TOKEN": "long-secret-z", "A_TOKEN": "long-secret-a"}
+    ) as environment_file:
+        assert environment_file is not None
+        assert environment_file.read_bytes() == (b"A_TOKEN=long-secret-a\nZ_TOKEN=long-secret-z\n")
+        parent = environment_file.parent
+    assert not environment_file.exists()
+    assert not parent.exists()
+
+
+def test_builder_requires_private_indirect_environment_file(tmp_path: Path) -> None:
+    request = _request(tmp_path, environment={"TOKEN": "secret"}, allowlist=("TOKEN",))
+    with pytest.raises(ConfigurationError, match="private environment file"):
+        DockerCommandBuilder(Path("docker")).build(request)
+
+
+def test_container_environment_values_must_be_single_line(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match="single-line"):
+        _request(tmp_path, environment={"TOKEN": "line-one\nline-two"}, allowlist=("TOKEN",))
 
 
 @pytest.mark.parametrize(
@@ -421,7 +437,7 @@ def test_verifier_cannot_receive_secret_mount(tmp_path: Path) -> None:
         )
 
 
-def test_dependency_cache_requires_destination_below_cache_root(tmp_path: Path) -> None:
+def test_dependency_cache_is_forbidden(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
     mounts = (
         DockerMount(
@@ -432,15 +448,35 @@ def test_dependency_cache_requires_destination_below_cache_root(tmp_path: Path) 
         ),
         DockerMount(
             source=paths["workspace-two"],
-            destination="/proofpatch/cache",
+            destination="/proofpatch/cache/npm",
             kind=MountKind.DEPENDENCY_CACHE,
             access=MountAccess.READ_ONLY,
         ),
     )
-    with pytest.raises(ConfigurationError, match="below"):
+    with pytest.raises(ConfigurationError, match="forbidden"):
         validate_mounts(
             mounts,
             phase=ExecutionPhase.INVESTIGATION,
+            original_repository=paths["original"],
+            evidence_directory=paths["evidence"],
+            working_directory="/workspace",
+        )
+
+
+def test_protected_setup_phase_is_rejected_at_mount_boundary(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    mounts = (
+        DockerMount(
+            source=paths["workspace"],
+            destination="/workspace",
+            kind=MountKind.WORKSPACE,
+            access=MountAccess.READ_WRITE,
+        ),
+    )
+    with pytest.raises(ConfigurationError, match="setup execution is unsupported"):
+        validate_mounts(
+            mounts,
+            phase=ExecutionPhase.SETUP,
             original_repository=paths["original"],
             evidence_directory=paths["evidence"],
             working_directory="/workspace",

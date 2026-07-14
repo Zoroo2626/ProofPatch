@@ -9,6 +9,11 @@ remains explicitly `OBSERVATION ONLY` and provides no sandbox security boundary.
 adapters, deterministic repeated-attempt analysis, and the least-privilege GitHub receipt
 integration are implemented.
 
+Protected verifier setup and live-network oracles are intentionally unsupported. Dependencies must
+be baked into the resolved immutable verifier image so baseline and final verification cannot drift
+through independent installation. ProofPatch fixes a small set of locale/timezone/hash-seed inputs
+but does not claim complete runtime determinism or network record-and-replay.
+
 ## Intended threat model
 
 The planned protected mode treats coding agents, repository contents, configured commands, and

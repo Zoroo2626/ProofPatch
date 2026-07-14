@@ -77,20 +77,28 @@ substring, and time-bounded regex matchers. Truncated output cannot satisfy a re
 Receipts are canonical JSON plus Markdown and state only the observed transition, regression
 results, hashes, and an evidence-backed protection level. Receipt hashing is noncircular: the
 receipt records the decision-chain hash immediately before `receipt.created`; that event then
-records the hashes of the completed JSON and Markdown. Verification reconciles those files with
-the baseline, contract, patch, verified transition, resolved image digests, and complete chain.
+records the hashes of the completed JSON and Markdown. The verifier environment uses two other
+noncircular hashes: `prepared_environment_sha256` hashes the immutable image, platform, empty setup
+configuration, and fixed environment; `environment_inputs_sha256` then hashes the complete
+environment document with that prepared hash but without hashing itself. Verification reconciles
+receipt files with the baseline, contract, reproduction assets, patch, stored oracle results,
+verified transition, workflow-plan event, environment event, resolved image identities, and
+complete chain.
 
 The Phase 4 Docker backend checks daemon readiness and Linux-container mode, resolves mutable image
 references to immutable digests, and routes every container through one central argument builder.
 The request model has no raw Docker flag escape hatch. It enforces a read-only root, bounded
 non-executable tmpfs, non-root user, all-capability drop, no-new-privileges, explicit non-host
 network, finite CPU/memory/PID/time/output limits, deterministic names, and managed/run/phase
-labels. Environment values are passed to the Docker CLI through a controlled host environment and
-only allowlisted names appear in recorded argv.
+labels. Environment values are delivered through a private, short-lived Docker environment file,
+so the host Docker client never inherits container values. Only the environment-file path appears
+in recorded argv; the file is removed after container cleanup.
 
 Mount validation is phase-specific. Investigation source is read-only; patch workspaces are
 writable independent clones; reproduction assets reverse access as required; oracle source is
-read-only after writable setup; verifier phases have no network or secret mounts. The validator
+read-only; verifier phases have no network or secret mounts. Protected setup commands are rejected
+until one setup result can be reused as an immutable prepared environment. Dependencies must be
+baked into the resolved verifier image. The validator
 rejects overlapping destinations, link or reparse
 sources, original/evidence path intersections, Docker sockets, user homes, and common credential
 locations. Cleanup inspects an exact active name and verifies all ownership labels before graceful
@@ -108,8 +116,11 @@ points, hardlinks, special files, missing or undeclared files, hash mismatches, 
 size, repository-configuration attempts, evidence references, and investigator-output-dependent
 oracles. Valid bytes are copied into controller-owned evidence and revalidated before use.
 
-Baseline reproduction always uses another fresh independent clone, the verifier image, network
-`none`, no agent credentials, and a read-only copy of approved assets. The exact contract oracle is
+Baseline reproduction always uses another fresh independent clone, the exact immutable verifier
+image also used for final verification, network `none`, no agent credentials, and a read-only copy
+of approved assets. The controller binds the image digest and local ID, linux/amd64 platform,
+baseline commit, dependency-lockfile hashes, fixed locale/timezone/hash-seed inputs, oracle inputs,
+network policy, and fresh-tmpfs policy into evidence and the receipt. The exact contract oracle is
 evaluated by ProofPatch. Only a passing baseline expectation produces `BASELINE_REPRODUCED`; all
 other outcomes remain unable to create a patch clone. Contract, asset, process-log, oracle, and
 gate-decision facts are bound into the hash-chained evidence.
@@ -126,6 +137,16 @@ revalidates the original, captures the effective Git tree as an exact binary pat
 empty or denied patch, applies that patch to another fresh clone, reruns the immutable contract's
 fixed expectation, and runs every required regression. Only those controller observations can
 produce `VERIFIED`.
+
+Each oracle receives a new container and hardened `/tmp` tmpfs. Source and reproduction mounts are
+read-only, and the host hashes every non-Git workspace entry before and after each oracle to detect
+backend-policy failures or source mutation. No cache or scratch mount is shared between baseline
+and final verification.
+
+These controls reduce drift but are not a claim of complete runtime determinism. ProofPatch does
+not freeze wall-clock time, application random sources, process scheduling, test order, parallel
+execution, or filesystem enumeration order. It has no network record-and-replay facility; live
+network-dependent protected oracles and network-enabled dependency setup are unsupported.
 
 A separate repository-wide lifecycle lease prevents overlapping full workflows while the existing
 operation lock protects individual evidence mutations. Resume uses only evidence-backed

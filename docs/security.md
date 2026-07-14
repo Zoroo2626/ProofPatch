@@ -3,6 +3,11 @@
 Protected mode uses Docker with Linux containers as its initial operating-system enforcement
 boundary. Agent adapters cannot customize or weaken the central container policy.
 
+Protected verification does not run setup commands. Dependencies must be baked into the immutable
+verifier image. This fail-closed restriction prevents baseline and final verification from
+independently resolving different dependency versions. Both oracle phases use the same resolved
+image digest and local image ID with network `none`.
+
 Enforced boundaries include read-only investigation source, independent clones, no original
 repository mount, no evidence-store mount, no Docker socket, no host home or credentials directory,
 an explicit environment allowlist, a non-root user, dropped capabilities, no-new-privileges,
@@ -62,6 +67,12 @@ ephemerally without user config or repository rule loading, with an inner phase-
 sandbox that cannot expand the outer Docker boundary. Provider JSON/transcript output remains
 untrusted, bounded, secret-redacted, privately stored, and incapable of bypassing evidence or
 verification gates.
+
+Allowlisted container values are written in deterministic name order to a private, single-use
+environment file. The Docker client receives only controller-owned Docker settings; it does not
+inherit container values. Docker reads the file, ProofPatch keeps it present through container
+cleanup, and then removes both the file and its private temporary directory. Values containing
+newlines or NUL bytes are rejected, and the file path—not its contents—is the only Docker argument.
 
 Phase 8 retry authorization remains controller-owned and is capped at ten configured attempts.
 Each patch and final-verification workspace is a fresh independent baseline clone with a unique
@@ -123,8 +134,18 @@ enforces monotonic timeouts and a combined output limit, and terminates process 
 where the platform permits. Exact configured secret values are removed before logs are persisted;
 derived, encoded, fragmented, or transformed secrets may still be disclosed by a repository
 process. Secret values in command arguments are rejected when detected. Protected baseline and
-final oracle containers instead receive a read-only source mount after the separate writable setup
-phase.
+final oracle containers receive a read-only source mount and fresh hardened tmpfs. The controller
+hashes source contents before and after each oracle and rejects mutation.
+
+Verifier evidence explicitly binds the base image digest and ID, linux/amd64 platform, empty setup
+configuration, dependency-lockfile hashes, baseline commit, network policy, fixed locale/timezone
+and Python hash seed, oracle configuration, read-only source policy, and fresh scratch policy.
+Receipt verification recomputes the noncircular identity hashes and reconciles the environment
+artifact with its event and receipt.
+
+ProofPatch does not freeze time, application randomness, scheduler behavior, test ordering,
+parallelism, or filesystem ordering. It does not implement network record-and-replay. Any protected
+oracle requiring live network access is unsupported; the controller never silently enables it.
 
 Disk limits are layered: repository size, patch bytes, changed-file count, process output, event
 chain size, reproduction assets, and attempt count are bounded. With `retain_workspaces: false`,

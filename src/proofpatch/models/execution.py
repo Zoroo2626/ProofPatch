@@ -285,8 +285,10 @@ class ExecutionRequest(BaseModel):
     def environment_is_bounded_and_valid(cls, value: dict[str, str]) -> dict[str, str]:
         if len(value) > 128 or any(ENVIRONMENT_NAME.fullmatch(name) is None for name in value):
             raise ValueError("execution environment contains invalid or excessive names")
-        if any("\0" in item for pair in value.items() for item in pair):
-            raise ValueError("execution environment must be NUL-free")
+        if any(
+            "\0" in item or "\r" in item or "\n" in item for pair in value.items() for item in pair
+        ):
+            raise ValueError("execution environment must be NUL-free and single-line")
         if sum(len(item.encode("utf-8")) for pair in value.items() for item in pair) > 256 * 1024:
             raise ValueError("execution environment exceeds the encoded size limit")
         return value
@@ -477,8 +479,10 @@ class CommandOracleSpec(BaseModel):
             raise ValueError("oracle environment has too many entries")
         if any(ENVIRONMENT_NAME.fullmatch(name) is None for name in value):
             raise ValueError("oracle environment contains an invalid variable name")
-        if any("\0" in item for pair in value.items() for item in pair):
-            raise ValueError("oracle environment must be NUL-free")
+        if any(
+            "\0" in item or "\r" in item or "\n" in item for pair in value.items() for item in pair
+        ):
+            raise ValueError("oracle environment must be NUL-free and single-line")
         if sum(len(item.encode("utf-8")) for pair in value.items() for item in pair) > 256 * 1024:
             raise ValueError("oracle environment exceeds the encoded size limit")
         return value

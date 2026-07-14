@@ -97,6 +97,7 @@ class RunPaths:
     changed_files: Path
     patch_result: Path
     workflow_plan: Path
+    environment_identity: Path
     attempts: Path
     verification: Path
     contract: Path
@@ -146,6 +147,7 @@ def build_run_paths(data_root: Path, repository_id: str, run_id: str) -> RunPath
         changed_files=root / "patch" / "changed-files.json",
         patch_result=root / "patch" / "agent-result.json",
         workflow_plan=root / "workflow-plan.json",
+        environment_identity=root / "verifier-environment.json",
         attempts=root / "attempts",
         verification=root / "verification",
         contract=root / "verification" / "contract.json",

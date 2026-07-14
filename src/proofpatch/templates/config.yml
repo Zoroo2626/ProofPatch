@@ -36,7 +36,7 @@ runtime:
     output_mb: 25
 
 network:
-  setup: bridge
+  setup: none
   investigation: bridge
   patch: bridge
   baseline: none

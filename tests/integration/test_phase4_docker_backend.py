@@ -59,6 +59,8 @@ class DockerSimulation:
         self.container_running = False
         self.labels: dict[str, str] = {}
         self.removed: list[str] = []
+        self.container_environment_file: bytes | None = None
+        self.docker_run_environment: dict[str, str] | None = None
 
     def run(self, request: ProcessRequest) -> ProcessOutcome:
         self.requests.append(request)
@@ -98,6 +100,10 @@ class DockerSimulation:
             self.image_present = True
             return _outcome(stdout=b"pulled")
         if command == "run":
+            self.docker_run_environment = dict(request.environment)
+            if "--env-file" in request.argv:
+                environment_path = Path(request.argv[request.argv.index("--env-file") + 1])
+                self.container_environment_file = environment_path.read_bytes()
             self.container_exists = True
             self.container_running = True
             self.labels = _labels_from_run(request.argv)
@@ -309,6 +315,36 @@ def test_container_cleanup_after_success_and_failure(
     run_request = next(request for request in simulation.requests if request.argv[1] == "run")
     assert str(tmp_path / "original") not in run_request.argv
     assert str(tmp_path / "evidence") not in run_request.argv
+
+
+def test_container_values_do_not_enter_the_docker_client_environment(tmp_path: Path) -> None:
+    simulation = DockerSimulation()
+    backend = DockerBackend(executable=_executable(tmp_path), runner=simulation)
+    request = ExecutionRequest.model_validate(
+        {
+            **_request(tmp_path).model_dump(),
+            "environment": {"DOCKER_HOST": "container-only", "TOKEN": "secret-value"},
+            "environment_allowlist": ("DOCKER_HOST", "TOKEN"),
+        }
+    )
+
+    result = backend.run(request)
+
+    assert result.cleanup_confirmed
+    assert simulation.container_environment_file == (
+        b"DOCKER_HOST=container-only\nTOKEN=secret-value\n"
+    )
+    assert simulation.docker_run_environment is not None
+    assert "TOKEN" not in simulation.docker_run_environment
+    assert simulation.docker_run_environment.get("DOCKER_HOST") != "container-only"
+    environment_path = Path(
+        next(
+            command.argv[command.argv.index("--env-file") + 1]
+            for command in simulation.requests
+            if command.argv[1] == "run"
+        )
+    )
+    assert not environment_path.exists()
 
 
 def test_timeout_stops_and_removes_container(tmp_path: Path) -> None:

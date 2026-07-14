@@ -22,6 +22,7 @@ from proofpatch.security.paths import (
 )
 from proofpatch.services.coordinator import RunCoordinator
 from proofpatch.services.locks import RepositoryLock
+from proofpatch.services.receipt import ReceiptService
 
 COMPLETED_STATES = frozenset(
     {
@@ -194,6 +195,10 @@ class RunCleanupService:
                 remediation="Abort or finish the run before cleaning disposable workspaces.",
             )
         paths = self.coordinator.paths_for(status.manifest.run_id)
+        if status.state in {RunState.VERIFIED, RunState.APPLIED} or (
+            paths.receipt_json.exists() or paths.receipt_markdown.exists()
+        ):
+            ReceiptService(self.coordinator).verify(status.manifest.run_id)
         targets: list[ValidatedCleanupTarget] = []
         try:
             paths.workspaces.lstat()

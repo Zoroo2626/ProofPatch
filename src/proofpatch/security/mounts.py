@@ -30,17 +30,10 @@ _DESTINATION_ROOTS = {
 }
 
 _PHASE_ACCESS: dict[ExecutionPhase, dict[MountKind, frozenset[MountAccess]]] = {
-    ExecutionPhase.SETUP: {
-        MountKind.WORKSPACE: frozenset({MountAccess.READ_WRITE}),
-        MountKind.OUTPUT: frozenset({MountAccess.READ_WRITE}),
-        MountKind.DEPENDENCY_CACHE: frozenset({MountAccess.READ_ONLY, MountAccess.READ_WRITE}),
-        MountKind.SECRET: frozenset({MountAccess.READ_ONLY}),
-    },
     ExecutionPhase.INVESTIGATION: {
         MountKind.WORKSPACE: frozenset({MountAccess.READ_ONLY}),
         MountKind.REPRODUCTION: frozenset({MountAccess.READ_WRITE}),
         MountKind.OUTPUT: frozenset({MountAccess.READ_WRITE}),
-        MountKind.DEPENDENCY_CACHE: frozenset({MountAccess.READ_ONLY, MountAccess.READ_WRITE}),
         MountKind.SECRET: frozenset({MountAccess.READ_ONLY}),
         MountKind.PROMPT: frozenset({MountAccess.READ_ONLY}),
         MountKind.ISSUE: frozenset({MountAccess.READ_ONLY}),
@@ -49,7 +42,6 @@ _PHASE_ACCESS: dict[ExecutionPhase, dict[MountKind, frozenset[MountAccess]]] = {
         MountKind.WORKSPACE: frozenset({MountAccess.READ_WRITE}),
         MountKind.REPRODUCTION: frozenset({MountAccess.READ_ONLY}),
         MountKind.OUTPUT: frozenset({MountAccess.READ_WRITE}),
-        MountKind.DEPENDENCY_CACHE: frozenset({MountAccess.READ_ONLY, MountAccess.READ_WRITE}),
         MountKind.SECRET: frozenset({MountAccess.READ_ONLY}),
         MountKind.PROMPT: frozenset({MountAccess.READ_ONLY}),
         MountKind.ISSUE: frozenset({MountAccess.READ_ONLY}),
@@ -58,13 +50,11 @@ _PHASE_ACCESS: dict[ExecutionPhase, dict[MountKind, frozenset[MountAccess]]] = {
         MountKind.WORKSPACE: frozenset({MountAccess.READ_ONLY}),
         MountKind.REPRODUCTION: frozenset({MountAccess.READ_ONLY}),
         MountKind.OUTPUT: frozenset({MountAccess.READ_WRITE}),
-        MountKind.DEPENDENCY_CACHE: frozenset({MountAccess.READ_ONLY, MountAccess.READ_WRITE}),
     },
     ExecutionPhase.VERIFICATION: {
         MountKind.WORKSPACE: frozenset({MountAccess.READ_ONLY}),
         MountKind.REPRODUCTION: frozenset({MountAccess.READ_ONLY}),
         MountKind.OUTPUT: frozenset({MountAccess.READ_WRITE}),
-        MountKind.DEPENDENCY_CACHE: frozenset({MountAccess.READ_ONLY, MountAccess.READ_WRITE}),
     },
 }
 
@@ -79,6 +69,11 @@ def validate_mounts(
     working_directory: str,
 ) -> tuple[DockerMount, ...]:
     """Validate every host path and its exact phase-specific exposure."""
+
+    if phase is ExecutionPhase.SETUP:
+        raise ConfigurationError(
+            "Protected setup execution is unsupported; use an immutable prepared image"
+        )
 
     selected = tuple(mounts)
     if not selected:

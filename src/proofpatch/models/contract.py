@@ -104,8 +104,10 @@ class ContractCommandOracle(BaseModel):
             raise ValueError("contract environment has too many entries")
         if any(ENVIRONMENT_NAME.fullmatch(name) is None for name in value):
             raise ValueError("contract environment contains an invalid name")
-        if any("\0" in item for pair in value.items() for item in pair):
-            raise ValueError("contract environment must be NUL-free")
+        if any(
+            "\0" in item or "\r" in item or "\n" in item for pair in value.items() for item in pair
+        ):
+            raise ValueError("contract environment must be NUL-free and single-line")
         if sum(len(item.encode("utf-8")) for pair in value.items() for item in pair) > 256 * 1024:
             raise ValueError("contract environment exceeds the encoded size limit")
         return value

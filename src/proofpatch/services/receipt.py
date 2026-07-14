@@ -8,14 +8,18 @@ from typing import Final
 
 from pydantic import ValidationError
 
-from proofpatch.errors import EvidenceIntegrityError, PatchError
+from proofpatch.errors import ContractError, EvidenceIntegrityError, PatchError
 from proofpatch.git.diff import verify_patch_hash
 from proofpatch.models.contract import FailureContract
+from proofpatch.models.environment import VerifierEnvironmentIdentity
 from proofpatch.models.execution import OracleEvaluation, OraclePhase, ProtectionLevel
 from proofpatch.models.patch import PatchRecord, RepositorySnapshot
 from proofpatch.models.receipt import VerificationReceipt
 from proofpatch.models.state import RunState
+from proofpatch.security.paths import validate_proofpatch_data_path
+from proofpatch.services.contracts import ContractService
 from proofpatch.services.coordinator import RunCoordinator
+from proofpatch.services.environment import verify_verifier_environment_identity
 from proofpatch.services.evidence import (
     canonical_json_bytes,
     read_canonical_json,
@@ -107,7 +111,7 @@ class ReceiptService:
             if len(candidates) != 1:
                 raise EvidenceIntegrityError("Receipt has no unique baseline observation")
             baseline = candidates[0]
-            self._verify_oracle_event(receipt.run_id, baseline)
+        self._verify_oracle_event(receipt.run_id, baseline)
         if (
             receipt.project.repository_id != snapshot.repository_id
             or receipt.project.baseline_commit != snapshot.baseline_commit
@@ -132,6 +136,12 @@ class ReceiptService:
             != receipt.contract.sha256
         ):
             raise EvidenceIntegrityError("Receipt contract hash does not match stored evidence")
+        if contract_path == paths.submitted_contract:
+            contract = FailureContract.model_validate(contract_document)
+            try:
+                ContractService().validate_approved_assets(contract, paths.reproduction_assets)
+            except ContractError as error:
+                raise EvidenceIntegrityError("Receipt reproduction assets are invalid") from error
 
         if receipt.patch is not None:
             try:
@@ -149,6 +159,9 @@ class ReceiptService:
             self._verify_verified_transition(receipt)
         if receipt.protection_level is ProtectionLevel.PROTECTED:
             self._verify_image_identity(receipt.run_id)
+            self._verify_environment_identity(receipt)
+        for evaluation in receipt.verification.oracles:
+            self._verify_oracle_event(receipt.run_id, evaluation)
 
     def _verify_verified_transition(self, receipt: VerificationReceipt) -> None:
         if receipt.patch is None:
@@ -188,6 +201,47 @@ class ReceiptService:
         ):
             raise EvidenceIntegrityError("Protected receipt image identity binding is invalid")
 
+    def _verify_environment_identity(self, receipt: VerificationReceipt) -> None:
+        if receipt.environment is None:
+            raise EvidenceIntegrityError("Protected receipt has no verifier environment identity")
+        paths = self.coordinator.paths_for(receipt.run_id)
+        try:
+            identity = VerifierEnvironmentIdentity.model_validate(
+                read_canonical_json(paths.environment_identity)
+            )
+        except ValidationError as error:
+            raise EvidenceIntegrityError(
+                "Stored verifier environment identity is invalid"
+            ) from error
+        verify_verifier_environment_identity(identity)
+        if identity != receipt.environment:
+            raise EvidenceIntegrityError("Receipt verifier environment identity does not match")
+        status = self.coordinator.status(receipt.run_id)
+        events = [event for event in status.events if event.type == "environment.prepared"]
+        if len(events) != 1 or (
+            events[0].payload.get("environment_inputs_sha256") != identity.environment_inputs_sha256
+            or events[0].payload.get("prepared_environment_sha256")
+            != identity.prepared_environment_sha256
+            or events[0].payload.get("base_image_digest") != identity.base_image_digest
+            or events[0].payload.get("base_image_id") != identity.base_image_id
+            or events[0].payload.get("platform") != identity.platform
+            or events[0].payload.get("architecture") != identity.architecture
+            or events[0].payload.get("baseline_network") != identity.network.baseline
+            or events[0].payload.get("verification_network") != identity.network.verification
+        ):
+            raise EvidenceIntegrityError("Verifier environment identity event binding is invalid")
+
+        plan = read_canonical_json(paths.workflow_plan)
+        configuration_events = [
+            event for event in status.events if event.type == "configuration.resolved"
+        ]
+        if (
+            len(configuration_events) != 1
+            or configuration_events[0].payload.get("sha256")
+            != hashlib.sha256(canonical_json_bytes(plan)).hexdigest()
+        ):
+            raise EvidenceIntegrityError("Resolved workflow configuration binding is invalid")
+
     def _verify_oracle_event(self, run_id: str, evaluation: OracleEvaluation) -> None:
         status = self.coordinator.status(run_id)
         matches = [
@@ -196,13 +250,21 @@ class ReceiptService:
             if event.type in {"oracle.completed", "oracle.failed"}
             and event.payload.get("oracle_id") == evaluation.oracle_id
             and event.payload.get("phase") == evaluation.phase.value
+            and event.payload.get("passed") == evaluation.passed
+            and event.payload.get("failure_code") == evaluation.failure_code
+            and event.payload.get("process") == evaluation.process.model_dump(mode="json")
         ]
-        if len(matches) != 1 or (
-            matches[0].payload.get("passed") != evaluation.passed
-            or matches[0].payload.get("failure_code") != evaluation.failure_code
-            or matches[0].payload.get("process") != evaluation.process.model_dump(mode="json")
-        ):
+        if len(matches) != 1:
             raise EvidenceIntegrityError("Receipt oracle observation is not event-bound")
+        paths = self.coordinator.paths_for(run_id)
+        result_path = paths.root / Path(evaluation.process.stdout_path).parent / "result.json"
+        validate_proofpatch_data_path(self.coordinator.directories.data, result_path)
+        try:
+            stored = OracleEvaluation.model_validate(read_canonical_json(result_path))
+        except (ValidationError, EvidenceIntegrityError) as error:
+            raise EvidenceIntegrityError("Stored oracle result is invalid") from error
+        if stored != evaluation:
+            raise EvidenceIntegrityError("Stored oracle result does not match decision evidence")
 
 
 def render_markdown(receipt: VerificationReceipt) -> str:
@@ -246,6 +308,17 @@ def render_markdown(receipt: VerificationReceipt) -> str:
             [
                 f"- Patch SHA-256: `{receipt.patch.sha256}`",
                 f"- Changed files: {receipt.patch.changed_files}",
+            ]
+        )
+    if receipt.environment is not None:
+        lines.extend(
+            [
+                f"- Base image digest: `{receipt.environment.base_image_digest}`",
+                "- Prepared environment SHA-256: "
+                f"`{receipt.environment.prepared_environment_sha256}`",
+                f"- Verifier input SHA-256: `{receipt.environment.environment_inputs_sha256}`",
+                f"- Platform: `{receipt.environment.platform}`",
+                "- Oracle networks: `baseline=none`, `verification=none`",
             ]
         )
     if receipt.rejection_code is not None:

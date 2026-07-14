@@ -17,6 +17,15 @@ def validate_protected_configuration(config: ProofPatchConfig) -> None:
             "Protected workflows do not support setup secret-file mounts",
             remediation="Use agent environment allowlisting or remove readonly_secret_files.",
         )
+    if config.setup.commands or config.setup.environment or config.network.setup != "none":
+        raise ConfigurationError(
+            "Protected verifier setup is unsupported because ProofPatch cannot yet reuse one "
+            "immutable prepared environment",
+            remediation=(
+                "Bake dependencies into the immutable runtime image and set "
+                "setup.commands=[], setup.environment={}, and network.setup=none."
+            ),
+        )
     if config.runtime.dockerfile is not None or config.runtime.context != ".":
         raise ConfigurationError(
             "Protected workflows require a prebuilt immutable image; "

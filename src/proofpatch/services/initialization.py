@@ -139,7 +139,7 @@ def _starter_document(project_name: str, mode: InitMode, template: InitTemplate)
             },
         },
         "network": {
-            "setup": "bridge",
+            "setup": "none",
             "investigation": "bridge",
             "patch": "bridge",
             "baseline": "none",
@@ -204,13 +204,7 @@ def _template_values(template: InitTemplate) -> tuple[str, list[object], list[ob
     if template is InitTemplate.PYTHON:
         return (
             "python:3.12-slim",
-            [
-                {
-                    "id": "install",
-                    "argv": ["python", "-m", "pip", "install", "-e", "."],
-                    "timeout_seconds": 600.0,
-                }
-            ],
+            [],
             [
                 {
                     "id": "tests",
@@ -226,13 +220,7 @@ def _template_values(template: InitTemplate) -> tuple[str, list[object], list[ob
     if template is InitTemplate.NODE:
         return (
             "node:22-slim",
-            [
-                {
-                    "id": "install",
-                    "argv": ["npm", "install"],
-                    "timeout_seconds": 600.0,
-                }
-            ],
+            [],
             [
                 {
                     "id": "tests",

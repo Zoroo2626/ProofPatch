@@ -60,7 +60,12 @@ def calculate_protection(
     _fact(_has_required_labels(command), "managed_labels", satisfied, failures)
     _fact(_has_finite_limits(command), "finite_resource_limits", satisfied, failures)
     _fact(_tmpfs_is_hardened(command), "hardened_tmpfs", satisfied, failures)
-    _fact(_environment_is_name_only(command), "environment_allowlist", satisfied, failures)
+    _fact(
+        _environment_is_indirect(request, command),
+        "environment_allowlist",
+        satisfied,
+        failures,
+    )
     try:
         validate_mounts(
             request.mounts,
@@ -148,5 +153,7 @@ def _tmpfs_is_hardened(command: DockerCommand) -> bool:
     )
 
 
-def _environment_is_name_only(command: DockerCommand) -> bool:
-    return all("=" not in value for value in _option_values(command.argv, "--env"))
+def _environment_is_indirect(request: ExecutionRequest, command: DockerCommand) -> bool:
+    direct = _option_values(command.argv, "--env")
+    files = _option_values(command.argv, "--env-file")
+    return not direct and len(files) == (1 if request.environment else 0)

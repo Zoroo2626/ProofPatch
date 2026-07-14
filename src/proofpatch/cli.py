@@ -34,6 +34,7 @@ from proofpatch.models.execution import (
     ResourceLimits,
 )
 from proofpatch.models.run import RunStatus
+from proofpatch.models.state import RunState
 from proofpatch.security.paths import validate_proofpatch_data_path
 from proofpatch.services.cleanup import RunCleanupPlan, RunCleanupService
 from proofpatch.services.configuration import validate_protected_configuration
@@ -150,7 +151,14 @@ def list_command() -> None:
 def status_command(run_id: Annotated[str, typer.Argument(help="ProofPatch run ID.")]) -> None:
     """Verify and show the current state of one run."""
 
-    _print_status(_coordinator().status(run_id))
+    coordinator = _coordinator()
+    status = coordinator.status(run_id)
+    paths = coordinator.paths_for(run_id)
+    if status.state in {RunState.VERIFIED, RunState.APPLIED} or (
+        paths.receipt_json.exists() or paths.receipt_markdown.exists()
+    ):
+        ReceiptService(coordinator).verify(run_id)
+    _print_status(status)
 
 
 @app.command("inspect")
@@ -176,7 +184,9 @@ def inspect_command(
     coordinator = _coordinator()
     status = coordinator.inspect(run_id)
     paths = coordinator.paths_for(run_id)
-    if paths.receipt_json.exists() or paths.receipt_markdown.exists():
+    if status.state in {RunState.VERIFIED, RunState.APPLIED} or (
+        paths.receipt_json.exists() or paths.receipt_markdown.exists()
+    ):
         ReceiptService(coordinator).verify(run_id)
     _print_status(status)
     if events:
@@ -656,6 +666,10 @@ def _workflow_plan(
         if config.agent.image is None or config.agent.image == config.runtime.image
         else backend.resolve_image(config.agent.image)
     )
+    if runtime_image.os != "linux" or runtime_image.architecture != "amd64":
+        raise ConfigurationError("Protected verification requires a linux/amd64 runtime image")
+    if agent_image.os != "linux" or agent_image.architecture != "amd64":
+        raise ConfigurationError("Protected agents require a linux/amd64 image")
     limits = config.runtime.limits
     output_bytes = min(limits.output_mb, config.evidence.maximum_log_mb) * 1024 * 1024
 

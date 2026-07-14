@@ -15,6 +15,8 @@ fresh clone. The user's original repository remains unchanged until explicit acc
 - Python 3.12 or newer
 - Git
 - Docker with Linux containers (required for protected execution)
+- A verifier image with all required dependencies already installed; protected setup commands are
+  rejected until ProofPatch can reuse one immutable prepared environment
 
 ## Install the development foundation
 
@@ -82,6 +84,10 @@ bounded stream capture, and timeout/interruption cleanup. Cleanup verifies exact
 before stopping or removing a container. Protected receipts require a complete successful
 restriction assessment.
 
+Allowlisted container credentials are delivered through a private, short-lived environment file.
+They are not inherited by the host Docker client, placed in Docker arguments, or serialized into
+evidence; the temporary file is removed after container cleanup.
+
 Phase 5 adds the machine-readable failure-contract schema, bounded reproduction assets, strict
 path/type/hash validation, the read-only investigation container workflow, and independent
 baseline reproduction in a fresh clone using the verifier image without agent credentials. An
@@ -95,6 +101,14 @@ fresh clone, protected JSON/Markdown receipts, safe checkpoint resume, cross-pro
 abort, and receipt-integrity enforcement before apply. Copy `proofpatch.example.yml` to
 `proofpatch.yml` and replace its image and agent command. Passing `--yes` is required before agent
 network access or configured environment forwarding.
+
+Protected baseline and final verification use the same resolved immutable verifier image and fixed
+`TZ=UTC`, `LANG=C`, `LC_ALL=C`, and `PYTHONHASHSEED=0` inputs. Setup commands and setup networking
+fail preflight; dependencies must be baked into that image. The receipt binds the image digest and
+ID, platform, baseline commit, dependency-lockfile hashes, oracle-configuration hash, network
+policy, scratch policy, and the noncircular verifier-input identity. Live-network oracles are not
+supported. ProofPatch does not claim control over application randomness, wall-clock reads, test
+ordering, parallel scheduling, or filesystem ordering.
 
 Phase 7 adds fixed, noninteractive Claude Code and Codex CLI adapters, provider credential
 allowlists, credential-free protected version probes, minimum tested CLI enforcement, and bounded
@@ -123,6 +137,10 @@ it does not protect against a compromised Docker daemon, container escape, or ma
 administrator. Hash chaining detects modification but is not a digital signature. See
 [SECURITY.md](SECURITY.md) and the [architecture](docs/architecture.md) for the implemented
 boundaries and explicit non-claims.
+
+ProofPatch does not implement network record-and-replay. Protected baseline and final oracles
+always use `network none`; a workflow that needs live external network access is unsupported rather
+than silently downgraded.
 
 Completed protected workflows remove disposable clones by default while retaining receipts,
 evidence, patch artifacts, and attempt records. Set `evidence.retain_workspaces: true` only when

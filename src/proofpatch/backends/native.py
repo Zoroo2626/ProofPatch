@@ -1,1 +1,1 @@
-"""Native observation execution is deferred to Phase 4."""
+"""Compatibility namespace for native observation-mode execution."""

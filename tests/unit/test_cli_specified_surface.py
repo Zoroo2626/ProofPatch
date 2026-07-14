@@ -110,7 +110,8 @@ def test_init_success_is_valid_deterministic_and_supports_observation(tmp_path: 
     assert created.template is InitTemplate.PYTHON
     assert loaded.mode == "protected"
     assert loaded.runtime.image == "python:3.12-slim"
-    assert loaded.setup.commands[0].argv[:3] == ("python", "-m", "pip")
+    assert loaded.setup.commands == ()
+    assert loaded.network.setup == "none"
 
     replaced = initialize_repository(
         tmp_path,

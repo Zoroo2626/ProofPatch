@@ -5,7 +5,9 @@ import logging
 import os
 import re
 import shutil
-from collections.abc import Mapping
+import tempfile
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
@@ -202,7 +204,21 @@ class DockerBackend:
         doctor = self._require_healthy()
         if self._executable is None:  # pragma: no cover - established by _require_healthy
             raise DockerUnavailableError("Docker CLI was not found")
-        command = DockerCommandBuilder(self._executable).build(request)
+        with _container_environment_file(request.environment) as environment_file:
+            return self._run_with_environment_file(request, doctor, environment_file)
+
+    def _run_with_environment_file(
+        self,
+        request: ExecutionRequest,
+        doctor: BackendDoctorResult,
+        environment_file: Path | None,
+    ) -> ExecutionResult:
+        if self._executable is None:  # pragma: no cover - established by _require_healthy
+            raise DockerUnavailableError("Docker CLI was not found")
+        command = DockerCommandBuilder(self._executable).build(
+            request,
+            environment_file=environment_file,
+        )
         protection = calculate_protection(doctor, request, command)
         if protection.level is not ProtectionLevel.PROTECTED:
             raise BackendError(
@@ -238,7 +254,7 @@ class DockerBackend:
                     cwd=Path.cwd(),
                     timeout_seconds=request.resources.timeout_seconds,
                     maximum_output_bytes=request.resources.output_bytes,
-                    environment={**_docker_control_environment(), **request.environment},
+                    environment=_docker_control_environment(),
                     secret_values=tuple(request.environment.values()),
                 )
             )
@@ -474,3 +490,59 @@ def _is_not_found(content: bytes) -> bool:
     return (
         "no such image" in lowered or "no such object" in lowered or "no such container" in lowered
     )
+
+
+@contextmanager
+def _container_environment_file(values: Mapping[str, str]) -> Iterator[Path | None]:
+    """Expose container values to Docker without inheriting them into the host client."""
+
+    if not values:
+        yield None
+        return
+    try:
+        directory = Path(tempfile.mkdtemp(prefix="proofpatch-docker-env-"))
+    except OSError as error:
+        raise BackendError("Could not create a private container environment file") from error
+    path = directory / "environment.list"
+    descriptor: int | None = None
+    creation_error: OSError | None = None
+    try:
+        directory.chmod(0o700)
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(path, flags, 0o600)
+        content = "".join(f"{name}={values[name]}\n" for name in sorted(values)).encode("utf-8")
+        view = memoryview(content)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("short container environment write")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        path.chmod(0o600)
+    except OSError as error:
+        creation_error = error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    if creation_error is not None:
+        path.unlink(missing_ok=True)
+        directory.rmdir()
+        raise BackendError(
+            "Could not create a private container environment file"
+        ) from creation_error
+    try:
+        yield path
+    finally:
+        try:
+            path.unlink(missing_ok=True)
+            directory.rmdir()
+        except OSError as error:
+            raise BackendError("Could not remove the private container environment file") from error

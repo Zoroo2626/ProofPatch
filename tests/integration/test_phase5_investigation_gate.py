@@ -2,10 +2,12 @@
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from proofpatch.backends.docker import _container_environment_file
 from proofpatch.errors import ContractError, RepositoryError
 from proofpatch.execution.docker_command import DockerCommandBuilder
 from proofpatch.execution.process import ProcessOutcome
@@ -263,8 +265,10 @@ def test_valid_contract_is_independently_reproduced_and_unlocks_only_gate_state(
     assert _git(patching.git, repository, "rev-parse", "HEAD") == original_head
     assert _git(patching.git, repository, "status", "--porcelain=v1", "-z") == b""
     investigation, baseline = backend.requests
-    DockerCommandBuilder(Path("docker")).build(investigation)
-    DockerCommandBuilder(Path("docker")).build(baseline)
+    with _container_environment_file(investigation.environment) as environment_file:
+        DockerCommandBuilder(Path("docker")).build(investigation, environment_file=environment_file)
+    with _container_environment_file(baseline.environment) as environment_file:
+        DockerCommandBuilder(Path("docker")).build(baseline, environment_file=environment_file)
     assert investigation.phase is ExecutionPhase.INVESTIGATION
     assert (
         next(mount for mount in investigation.mounts if mount.kind is MountKind.WORKSPACE).access
@@ -344,39 +348,11 @@ def test_unprotected_backend_result_cannot_enter_contract_gate(tmp_path: Path) -
     assert service.coordinator.status(RUN_ID).state is RunState.ERROR
 
 
-def test_setup_runs_in_separate_protected_phase_before_baseline(tmp_path: Path) -> None:
-    backend = FakeProtectedBackend()
-    service, _patching, repository = _service(tmp_path, backend)
-    result = service.investigate(
-        repository,
-        "Reported failure",
-        _plan(setup=True),
-        run_id=RUN_ID,
-    )
-    assert result.state is RunState.BASELINE_REPRODUCED
-    assert [request.phase for request in backend.requests] == [
-        ExecutionPhase.INVESTIGATION,
-        ExecutionPhase.SETUP,
-        ExecutionPhase.BASELINE,
-    ]
-    setup = backend.requests[1]
-    DockerCommandBuilder(Path("docker")).build(setup)
-    assert setup.network is NetworkPolicy.BRIDGE
-    assert all(mount.kind is not MountKind.REPRODUCTION for mount in setup.mounts)
+def test_protected_setup_is_rejected_before_any_execution() -> None:
+    with pytest.raises(ValueError, match="protected setup is unsupported"):
+        _plan(setup=True)
 
 
-def test_failed_setup_ends_gate_without_running_baseline_oracle(tmp_path: Path) -> None:
-    backend = FakeProtectedBackend("setup-failure")
-    service, _patching, repository = _service(tmp_path, backend)
-    with pytest.raises(ContractError, match="setup command failed"):
-        service.investigate(
-            repository,
-            "Reported failure",
-            _plan(setup=True),
-            run_id=RUN_ID,
-        )
-    assert service.coordinator.status(RUN_ID).state is RunState.ERROR
-    assert [request.phase for request in backend.requests] == [
-        ExecutionPhase.INVESTIGATION,
-        ExecutionPhase.SETUP,
-    ]
+def test_network_enabled_setup_is_rejected_even_without_commands() -> None:
+    with pytest.raises(ValueError, match="protected setup is unsupported"):
+        replace(_plan(), setup_network=NetworkPolicy.BRIDGE)

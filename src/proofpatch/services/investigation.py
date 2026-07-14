@@ -22,6 +22,7 @@ from proofpatch.git.clone import CloneKind, IndependentClone, validate_owned_clo
 from proofpatch.models.agent import AgentVersionMetadata
 from proofpatch.models.common import JsonValue
 from proofpatch.models.contract import FailureContract, NotReproducedOutcome
+from proofpatch.models.environment import VerifierEnvironmentIdentity
 from proofpatch.models.execution import (
     ENVIRONMENT_NAME,
     CommandOracleSpec,
@@ -44,8 +45,14 @@ from proofpatch.models.patch import RepositorySnapshot
 from proofpatch.models.state import RunState
 from proofpatch.oracles.base import OracleExecutionResult
 from proofpatch.oracles.command import CommandOracle
+from proofpatch.security.workspace import workspace_content_sha256
 from proofpatch.services.contracts import ContractService, ValidatedContract
 from proofpatch.services.coordinator import RunCoordinator
+from proofpatch.services.environment import (
+    build_verifier_environment_identity,
+    merge_verifier_environment,
+    verify_verifier_environment_identity,
+)
 from proofpatch.services.evidence import (
     canonical_json_bytes,
     read_canonical_json,
@@ -56,7 +63,6 @@ from proofpatch.services.patching import PatchService
 
 FAILURE_CONTRACT_NAME = "failure-contract.json"
 NOT_REPRODUCED_NAME = "not-reproduced.json"
-RESERVED_INVESTIGATION_ENVIRONMENT = frozenset({"PROOFPATCH_ISSUE", "PROOFPATCH_INSTRUCTIONS"})
 PRIVATE_FILE_MODE = 0o600
 
 
@@ -91,8 +97,10 @@ class InvestigationPlan:
     contract_environment_allowlist: tuple[str, ...] = ()
     setup_commands: tuple[SetupCommand, ...] = ()
     setup_environment: dict[str, str] = field(default_factory=dict)
+    regressions: tuple[CommandOracleSpec, ...] = ()
     investigation_network: NetworkPolicy = NetworkPolicy.AGENT_API
-    setup_network: NetworkPolicy = NetworkPolicy.BRIDGE
+    setup_network: NetworkPolicy = NetworkPolicy.NONE
+    maximum_repository_bytes: int = 2 * 1024 * 1024 * 1024
     adapter_name: str = "generic"
     adapter_version: int = 1
     version_probe: AgentVersionProbe | None = None
@@ -107,19 +115,31 @@ class InvestigationPlan:
         )
         if unexpected:
             raise ValueError("investigator environment contains non-allowlisted names")
-        if RESERVED_INVESTIGATION_ENVIRONMENT.intersection(self.investigator_environment):
-            raise ValueError("investigator environment overrides reserved ProofPatch names")
         for environment in (self.investigator_environment, self.setup_environment):
             if len(environment) > 128 or any(
                 ENVIRONMENT_NAME.fullmatch(name) is None for name in environment
             ):
                 raise ValueError("phase environment contains invalid or excessive names")
-            if any("\0" in item for pair in environment.items() for item in pair):
-                raise ValueError("phase environment must be NUL-free")
+            if any(
+                "\0" in item or "\r" in item or "\n" in item
+                for pair in environment.items()
+                for item in pair
+            ):
+                raise ValueError("phase environment must be NUL-free and single-line")
         if len(self.setup_commands) != len({command.id for command in self.setup_commands}):
             raise ValueError("setup command IDs must be unique")
+        if (
+            self.setup_commands
+            or self.setup_environment
+            or self.setup_network is not NetworkPolicy.NONE
+        ):
+            raise ValueError(
+                "protected setup is unsupported; bake dependencies into the immutable image"
+            )
         if not self.adapter_name or self.adapter_version < 1:
             raise ValueError("agent adapter identity is invalid")
+        if self.maximum_repository_bytes <= 0:
+            raise ValueError("repository size limit must be positive")
 
 
 class InvestigationOutcomeKind(StrEnum):
@@ -218,16 +238,6 @@ class InvestigationService:
                 investigation_clone,
             )
 
-        environment = dict(plan.investigator_environment)
-        environment["PROOFPATCH_ISSUE"] = issue_summary
-        environment["PROOFPATCH_INSTRUCTIONS"] = render_investigation_prompt(issue_summary)
-        allowlist = tuple(
-            sorted(
-                set(plan.investigator_environment_allowlist).union(
-                    RESERVED_INVESTIGATION_ENVIRONMENT
-                )
-            )
-        )
         try:
             result = self.backend.run(
                 ExecutionRequest(
@@ -269,8 +279,8 @@ class InvestigationService:
                             access=MountAccess.READ_ONLY,
                         ),
                     ),
-                    environment=environment,
-                    environment_allowlist=allowlist,
+                    environment=plan.investigator_environment,
+                    environment_allowlist=plan.investigator_environment_allowlist,
                     resources=plan.investigation_resources,
                     original_repository=Path(snapshot.repository_root),
                     evidence_directory=paths.root,
@@ -381,7 +391,42 @@ class InvestigationService:
             expected_issue_summary=issue_summary,
         )
         self._record_contract(run_id, validated)
+        self._record_environment_identity(run_id, snapshot, plan, validated.contract)
         return self._verify_baseline(run_id, snapshot, plan, validated)
+
+    def _record_environment_identity(
+        self,
+        run_id: str,
+        snapshot: RepositorySnapshot,
+        plan: InvestigationPlan,
+        contract: FailureContract,
+    ) -> VerifierEnvironmentIdentity:
+        identity = build_verifier_environment_identity(
+            self.patching.git,
+            snapshot,
+            plan.verifier_image,
+            contract.oracle.as_command_spec(),
+            plan.regressions,
+        )
+        verify_verifier_environment_identity(identity)
+        paths = self.coordinator.paths_for(run_id)
+        write_canonical_json(paths.environment_identity, identity.model_dump(mode="json"))
+        self.coordinator.append_event(
+            run_id,
+            "environment.prepared",
+            payload={
+                "environment_inputs_sha256": identity.environment_inputs_sha256,
+                "prepared_environment_sha256": identity.prepared_environment_sha256,
+                "base_image_digest": identity.base_image_digest,
+                "base_image_id": identity.base_image_id,
+                "platform": identity.platform,
+                "architecture": identity.architecture,
+                "setup_network": identity.network.setup,
+                "baseline_network": identity.network.baseline,
+                "verification_network": identity.network.verification,
+            },
+        )
+        return identity
 
     def _record_contract(self, run_id: str, validated: ValidatedContract) -> None:
         assets: list[JsonValue] = [
@@ -448,40 +493,6 @@ class InvestigationService:
             reproduction_mount,
         )
 
-        for index, setup in enumerate(plan.setup_commands, start=1):
-            setup_result = self.backend.run(
-                self._execution_request(
-                    run_id,
-                    snapshot,
-                    plan.verifier_image,
-                    baseline_clone.root,
-                    reproduction_mount,
-                    setup.argv,
-                    ExecutionPhase.SETUP,
-                    f"setup-{index}",
-                    _limits_with_timeout(plan.baseline_resources, setup.timeout_seconds),
-                    plan.setup_network,
-                    plan.setup_environment,
-                    tuple(sorted(plan.setup_environment)),
-                )
-            )
-            setup_outcome = _protected_process_outcome(setup_result)
-            if (
-                setup_outcome.termination is not TerminationKind.EXITED
-                or setup_outcome.exit_code != 0
-            ):
-                self.coordinator.append_event(
-                    run_id,
-                    "oracle.failed",
-                    payload={"oracle_id": setup.id, "phase": OraclePhase.SETUP.value},
-                )
-                self.coordinator.transition(
-                    run_id,
-                    RunState.ERROR,
-                    details={"reason": "baseline_setup_failed", "setup_id": setup.id},
-                )
-                raise ContractError(f"Verifier setup command failed: {setup.id}")
-
         contract_oracle = persisted.oracle
         spec = contract_oracle.as_command_spec()
         self.command_oracle.validate(spec)
@@ -494,6 +505,10 @@ class InvestigationService:
                 "phase": OraclePhase.BASELINE.value,
                 "argv_sha256": argv_hash,
             },
+        )
+        source_before = workspace_content_sha256(
+            baseline_clone.root,
+            maximum_bytes=plan.maximum_repository_bytes,
         )
         execution = self.backend.run(
             self._execution_request(
@@ -515,6 +530,17 @@ class InvestigationService:
                 working_directory=contract_oracle.cwd,
             )
         )
+        source_after = workspace_content_sha256(
+            baseline_clone.root,
+            maximum_bytes=plan.maximum_repository_bytes,
+        )
+        if source_after != source_before:
+            self.coordinator.append_event(
+                run_id,
+                "oracle.source_mutation_detected",
+                payload={"oracle_id": contract_oracle.id, "phase": OraclePhase.BASELINE.value},
+            )
+            raise ContractError("Baseline oracle modified its read-only source workspace")
         process = _protected_process_outcome(execution)
         write_canonical_json(
             paths.baseline_protection,
@@ -602,6 +628,9 @@ class InvestigationService:
         working_directory: str = "/workspace",
     ) -> ExecutionRequest:
         paths = self.coordinator.paths_for(run_id)
+        if phase is ExecutionPhase.BASELINE:
+            environment = merge_verifier_environment(environment)
+            environment_allowlist = tuple(sorted(set(environment_allowlist).union(environment)))
         mounts = [
             DockerMount(
                 source=workspace,

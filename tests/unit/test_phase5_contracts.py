@@ -297,11 +297,11 @@ def test_investigation_plan_rejects_environment_and_command_policy() -> None:
             investigator_environment={"TOKEN": "value"},
             **common,
         )
-    with pytest.raises(ValueError, match="reserved"):
+    with pytest.raises(ValueError, match="single-line"):
         InvestigationPlan(
             investigator_argv=("agent",),
-            investigator_environment={"PROOFPATCH_ISSUE": "override"},
-            investigator_environment_allowlist=("PROOFPATCH_ISSUE",),
+            investigator_environment={"TOKEN": "line-one\nline-two"},
+            investigator_environment_allowlist=("TOKEN",),
             investigator_image=image,
             verifier_image=image,
             investigation_resources=limits,

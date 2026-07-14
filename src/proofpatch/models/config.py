@@ -125,7 +125,7 @@ class RuntimeConfig(StrictConfigModel):
 
 
 class NetworkConfig(StrictConfigModel):
-    setup: Literal["bridge", "none"] = "bridge"
+    setup: Literal["bridge", "none"] = "none"
     investigation: Literal["bridge", "none"] = "bridge"
     patch: Literal["bridge", "none"] = "bridge"
     baseline: Literal["none"] = "none"
@@ -214,6 +214,17 @@ class RegressionOracleConfig(StrictConfigModel):
     @classmethod
     def argv_array_becomes_tuple(cls, value: object) -> object:
         return tuple(value) if isinstance(value, list) else value
+
+    @field_validator("environment")
+    @classmethod
+    def environment_is_safe(cls, value: dict[str, str]) -> dict[str, str]:
+        if len(value) > 128 or any(ENVIRONMENT_NAME.fullmatch(name) is None for name in value):
+            raise ValueError("regression environment contains invalid or excessive names")
+        if any(
+            "\0" in item or "\r" in item or "\n" in item for pair in value.items() for item in pair
+        ):
+            raise ValueError("regression environment must be NUL-free and single-line")
+        return value
 
 
 class OraclesConfig(StrictConfigModel):
