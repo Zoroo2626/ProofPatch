@@ -15,22 +15,22 @@ from proofpatch.models.state import RunState
 DATABASE_SCHEMA_VERSION: Final = 1
 PRIVATE_FILE_MODE: Final = 0o600
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS runs (
-    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
-    run_id TEXT PRIMARY KEY,
-    repository_id TEXT NOT NULL,
-    repository_root TEXT NOT NULL,
-    state TEXT NOT NULL,
-    created_at_utc TEXT NOT NULL,
-    updated_at_utc TEXT NOT NULL,
-    last_event_sequence INTEGER NOT NULL CHECK (last_event_sequence >= 1),
-    last_event_hash TEXT NOT NULL,
-    run_relative_path TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS runs_repository_updated
-    ON runs(repository_id, updated_at_utc DESC);
-"""
+_SCHEMA_STATEMENTS = (
+    """CREATE TABLE IF NOT EXISTS runs (
+        schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+        run_id TEXT PRIMARY KEY,
+        repository_id TEXT NOT NULL,
+        repository_root TEXT NOT NULL,
+        state TEXT NOT NULL,
+        created_at_utc TEXT NOT NULL,
+        updated_at_utc TEXT NOT NULL,
+        last_event_sequence INTEGER NOT NULL CHECK (last_event_sequence >= 1),
+        last_event_hash TEXT NOT NULL,
+        run_relative_path TEXT NOT NULL
+    )""",
+    """CREATE INDEX IF NOT EXISTS runs_repository_updated
+        ON runs(repository_id, updated_at_utc DESC)""",
+)
 
 _COLUMNS = """
 schema_version, run_id, repository_id, repository_root, state,
@@ -53,7 +53,7 @@ class RunStore:
 
         values = _record_values(record)
         try:
-            with self._connect() as connection:
+            with self._connect(write=True) as connection:
                 connection.execute(
                     f"INSERT INTO runs ({_COLUMNS}) VALUES ({','.join('?' for _ in values)})",  # noqa: S608
                     values,
@@ -81,7 +81,7 @@ class RunStore:
                 "run_relative_path",
             )
         )
-        with self._connect() as connection:
+        with self._connect(write=True) as connection:
             connection.execute(
                 f"""INSERT INTO runs ({_COLUMNS})
                 VALUES ({",".join("?" for _ in values)})
@@ -109,39 +109,67 @@ class RunStore:
         return tuple(_record_from_row(row) for row in rows)
 
     def _initialize(self) -> None:
-        with self._connect() as connection:
+        self._configure_journal()
+        os.chmod(self.database_path, PRIVATE_FILE_MODE)
+        with self._connect(write=True) as connection:
             current = int(connection.execute("PRAGMA user_version").fetchone()[0])
             if current not in (0, DATABASE_SCHEMA_VERSION):
                 raise InternalInvariantError(
                     f"Unsupported SQLite schema version: {current}",
                     remediation="Upgrade ProofPatch before reading this metadata index.",
                 )
-            connection.executescript(_SCHEMA)
+            for statement in _SCHEMA_STATEMENTS:
+                connection.execute(statement)
             connection.execute(f"PRAGMA user_version = {DATABASE_SCHEMA_VERSION}")
         os.chmod(self.database_path, PRIVATE_FILE_MODE)
 
+    def _configure_journal(self) -> None:
+        """Select WAL once instead of renegotiating it for every operation."""
+
+        with self._connect() as connection:
+            current = str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+            if current == "wal":
+                return
+            selected = str(connection.execute("PRAGMA journal_mode = WAL").fetchone()[0]).lower()
+            if selected != "wal":
+                raise InternalInvariantError("SQLite metadata index could not enable WAL mode")
+
     @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
+    def _connect(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
         _validate_database_path(self.database_path)
         try:
-            connection = sqlite3.connect(self.database_path, timeout=5.0)
+            connection = sqlite3.connect(
+                self.database_path,
+                timeout=5.0,
+                isolation_level=None,
+            )
         except sqlite3.Error as error:
             raise InternalInvariantError("Could not open the SQLite metadata index") from error
         connection.row_factory = sqlite3.Row
         try:
-            connection.execute("PRAGMA journal_mode = WAL")
-            connection.execute("PRAGMA synchronous = FULL")
+            connection.execute("PRAGMA synchronous = NORMAL")
             connection.execute("PRAGMA foreign_keys = ON")
+            if write:
+                connection.execute("BEGIN IMMEDIATE")
             yield connection
-            connection.commit()
+            if write:
+                connection.commit()
         except sqlite3.IntegrityError:
-            connection.rollback()
+            _rollback(connection)
             raise
         except sqlite3.Error as error:
-            connection.rollback()
+            _rollback(connection)
             raise InternalInvariantError("SQLite metadata operation failed") from error
+        except BaseException:
+            _rollback(connection)
+            raise
         finally:
             connection.close()
+
+
+def _rollback(connection: sqlite3.Connection) -> None:
+    if connection.in_transaction:
+        connection.rollback()
 
 
 def _record_values(record: RunRecord) -> tuple[object, ...]:

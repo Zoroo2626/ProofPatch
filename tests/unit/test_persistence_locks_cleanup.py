@@ -69,9 +69,54 @@ def test_sqlite_store_crud_ordering_and_rebuild(tmp_path: Path) -> None:
     )
     store.upsert(updated)
     assert store.get(RUN_ID) == updated
-    assert int(sqlite3.connect(database).execute("PRAGMA user_version").fetchone()[0]) == 1
+    with sqlite3.connect(database) as connection:
+        assert int(connection.execute("PRAGMA user_version").fetchone()[0]) == 1
     if os.name == "posix":
         assert database.stat().st_mode & 0o777 == 0o600
+
+
+def test_sqlite_store_separates_read_and_write_lock_lifetimes(tmp_path: Path) -> None:
+    database = tmp_path / "index.sqlite3"
+    store = RunStore(database)
+
+    with store._connect() as reader:
+        assert str(reader.execute("PRAGMA journal_mode").fetchone()[0]).lower() == "wal"
+        assert int(reader.execute("PRAGMA synchronous").fetchone()[0]) == 1
+        assert not reader.in_transaction
+        reader.execute("SELECT COUNT(*) FROM runs").fetchone()
+        assert not reader.in_transaction
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        reader.execute("SELECT 1")
+
+    with store._connect(write=True) as writer:
+        assert writer.in_transaction
+        writer.execute("SELECT COUNT(*) FROM runs").fetchone()
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        writer.execute("SELECT 1")
+
+    store.insert(_record())
+    with (
+        pytest.raises(RuntimeError, match="interrupted metadata update"),
+        store._connect(write=True) as interrupted,
+    ):
+        interrupted.execute("UPDATE runs SET state = 'PREFLIGHT' WHERE run_id = ?", (RUN_ID,))
+        raise RuntimeError("interrupted metadata update")
+    assert store.get(RUN_ID) == _record()
+
+
+def test_sqlite_reader_does_not_wait_for_an_active_writer(tmp_path: Path) -> None:
+    database = tmp_path / "index.sqlite3"
+    store = RunStore(database)
+    store.insert(_record())
+
+    with sqlite3.connect(database, isolation_level=None) as writer:
+        writer.execute("PRAGMA synchronous = NORMAL")
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute("UPDATE runs SET state = 'PREFLIGHT' WHERE run_id = ?", (RUN_ID,))
+        assert store.get(RUN_ID) == _record()
+        writer.rollback()
+
+    assert store.get(RUN_ID) == _record()
 
 
 def test_sqlite_store_rejects_duplicate_unsupported_and_invalid_rows(tmp_path: Path) -> None:
