@@ -1,7 +1,9 @@
 """Focused failure-mode tests for Phase 2 Git and patch primitives."""
 
 import io
+import signal
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -114,7 +116,8 @@ def test_git_client_failure_timeout_limits_and_decoding(tmp_path: Path) -> None:
         GitClient(executable="git").text(["status"], cwd=tmp_path, operation="text")
 
 
-def test_git_process_tree_kill_is_bounded_and_has_a_fallback() -> None:
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows taskkill behavior")
+def test_git_process_tree_kill_uses_windows_taskkill_and_fallback() -> None:
     process = Mock(pid=123)
     process.poll.return_value = None
     with patch("proofpatch.git.client.subprocess.run") as taskkill:
@@ -126,6 +129,23 @@ def test_git_process_tree_kill_is_bounded_and_has_a_fallback() -> None:
     process.poll.return_value = None
     timeout = subprocess.TimeoutExpired(["taskkill"], 2.0)
     with patch("proofpatch.git.client.subprocess.run", side_effect=timeout):
+        _kill_git_process(process)
+    process.kill.assert_called_once()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group behavior")
+def test_git_process_tree_kill_uses_unix_process_group_and_fallback() -> None:
+    process = Mock(pid=123)
+    process.poll.return_value = None
+    kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
+    with patch("proofpatch.git.client.os.killpg") as killpg:
+        _kill_git_process(process)
+    killpg.assert_called_once_with(123, kill_signal)
+    process.kill.assert_not_called()
+
+    process.reset_mock()
+    process.poll.return_value = None
+    with patch("proofpatch.git.client.os.killpg", side_effect=OSError("no process group")):
         _kill_git_process(process)
     process.kill.assert_called_once()
 

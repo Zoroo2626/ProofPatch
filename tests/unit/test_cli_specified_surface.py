@@ -9,6 +9,8 @@ from unittest.mock import patch
 
 import pytest
 import yaml
+from typer.core import TyperGroup, TyperOption
+from typer.main import get_command
 from typer.testing import CliRunner
 
 import proofpatch.cli as cli
@@ -637,14 +639,24 @@ def test_cleanup_rejects_mismatched_expected_identity_path(tmp_path: Path) -> No
 
 
 def test_explicit_run_and_inspect_options_are_exposed() -> None:
-    runner = CliRunner()
-    run_help = runner.invoke(app, ["run", "--help"], terminal_width=240, color=False)
-    inspect_help = runner.invoke(app, ["inspect", "--help"], terminal_width=240, color=False)
-    assert run_help.exit_code == inspect_help.exit_code == 0
+    root = get_command(app)
+    assert isinstance(root, TyperGroup)
+    run_options = _option_names(root, "run")
+    inspect_options = _option_names(root, "inspect")
     for option in ("--keep-workspaces", "--json", "--verbose", "--no-color"):
-        assert option in run_help.output
+        assert option in run_options
     for option in ("--patch", "--logs"):
-        assert option in inspect_help.output
+        assert option in inspect_options
+
+
+def _option_names(root: TyperGroup, command_name: str) -> set[str]:
+    command = root.commands[command_name]
+    return {
+        option_name
+        for parameter in command.params
+        if isinstance(parameter, TyperOption)
+        for option_name in (*parameter.opts, *parameter.secondary_opts)
+    }
 
 
 def test_clean_cli_selection_and_duration_options_fail_closed(

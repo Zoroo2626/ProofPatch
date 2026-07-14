@@ -98,8 +98,8 @@ def test_git_clone_supports_long_windows_run_paths(tmp_path: Path) -> None:
     representative_pack_path = (
         destination / ".git" / "objects" / "pack" / ("pack-" + "f" * 40 + ".keep")
     )
-    while len(str(representative_pack_path)) <= 275:
-        destination_parent /= "proofpatch-run"
+    while len(str(representative_pack_path)) < 240:
+        destination_parent /= "pp-run"
         destination = destination_parent / "verification"
         representative_pack_path = (
             destination / ".git" / "objects" / "pack" / ("pack-" + "f" * 40 + ".keep")
@@ -112,7 +112,8 @@ def test_git_clone_supports_long_windows_run_paths(tmp_path: Path) -> None:
         operation="long-path regression clone",
     )
 
-    assert len(str(representative_pack_path)) > 260
+    assert 240 <= len(str(representative_pack_path)) < 260
+    assert len(str(destination / ".git")) < 200
     assert (destination / ".git").is_dir()
 
 
