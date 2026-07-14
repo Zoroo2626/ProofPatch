@@ -4,12 +4,13 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Thread
-from typing import IO, BinaryIO, Final, cast
+from typing import IO, BinaryIO, Final
 
 from proofpatch.errors import ConfigurationError, ExecutionError
 from proofpatch.execution.output import OutputBudget
@@ -312,9 +313,16 @@ def _force_kill_process_tree(process: subprocess.Popen[bytes]) -> None:
             process.kill()
 
 
-def _kill_process_group(pid: int, selected_signal: int) -> None:
-    killpg = cast(Callable[[int, int], None], os.killpg)  # type: ignore[attr-defined]
-    killpg(pid, selected_signal)
+if sys.platform == "win32":
+
+    def _kill_process_group(pid: int, selected_signal: int) -> None:
+        del pid, selected_signal
+        raise OSError("POSIX process groups are unavailable on Windows")
+
+else:
+
+    def _kill_process_group(pid: int, selected_signal: int) -> None:
+        os.killpg(pid, selected_signal)
 
 
 def _taskkill_process_tree(process: subprocess.Popen[bytes], *, force: bool) -> None:

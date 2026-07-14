@@ -43,8 +43,6 @@ def workspace_content_sha256(root: Path, *, maximum_bytes: int) -> str:
             path = parent / name
             relative = path.relative_to(root).as_posix().encode("utf-8")
             status = _lstat(path)
-            if _is_reparse(status):
-                raise EvidenceIntegrityError("Verifier workspace contains a reparse point")
             if stat.S_ISLNK(status.st_mode):
                 try:
                     target = os.readlink(path).encode("utf-8")
@@ -52,6 +50,8 @@ def workspace_content_sha256(root: Path, *, maximum_bytes: int) -> str:
                     raise EvidenceIntegrityError("Could not hash a workspace symlink") from error
                 _update(digest, b"L", relative, target)
                 continue
+            if _is_reparse(status):
+                raise EvidenceIntegrityError("Verifier workspace contains a reparse point")
             if not stat.S_ISREG(status.st_mode) or status.st_nlink != 1:
                 raise EvidenceIntegrityError("Verifier workspace contains an unsafe file")
             content_size, content_sha256 = _hash_regular(path, status, maximum_bytes - total)

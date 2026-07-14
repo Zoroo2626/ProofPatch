@@ -252,6 +252,9 @@ def test_run_creation_rejects_linked_repository_data_directory_when_supported(
     with pytest.raises(EvidenceIntegrityError, match="Unsafe ProofPatch run storage"):
         service.create_run(REPOSITORY_ID, repository, run_id=RUN_ID)
     assert list(outside.iterdir()) == []
+    with pytest.raises(EvidenceIntegrityError, match="Unsafe ProofPatch run storage"):
+        service.list_runs()
+    repository_data.unlink()
     (service.directories.runs / "not-a-repo" / "not-a-run").mkdir(parents=True)
     assert service.list_runs() == ()
 

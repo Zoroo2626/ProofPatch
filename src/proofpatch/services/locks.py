@@ -4,6 +4,7 @@ import os
 import secrets
 import socket
 import stat
+import sys
 from contextlib import AbstractContextManager
 from pathlib import Path
 from types import TracebackType
@@ -191,7 +192,7 @@ def _is_reparse_point(file_status: os.stat_result) -> bool:
     return bool(attributes & reparse_flag)
 
 
-if os.name == "nt":
+if sys.platform == "win32":
     import msvcrt
 
     def _acquire_os_lock(lock_file: BinaryIO) -> None:
@@ -210,12 +211,12 @@ else:
 
     def _acquire_os_lock(lock_file: BinaryIO) -> None:
         try:
-            fcntl.flock(  # type: ignore[attr-defined]
+            fcntl.flock(
                 lock_file.fileno(),
-                fcntl.LOCK_EX | fcntl.LOCK_NB,  # type: ignore[attr-defined]
+                fcntl.LOCK_EX | fcntl.LOCK_NB,
             )
         except OSError as error:
             raise BlockingIOError from error
 
     def _release_os_lock(lock_file: BinaryIO) -> None:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)  # type: ignore[attr-defined]
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)

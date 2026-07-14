@@ -1,6 +1,7 @@
 """Phase 2 integration tests using real temporary Git repositories."""
 
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
@@ -87,6 +88,32 @@ def _content_snapshot(root: Path) -> dict[str, str]:
         for path in root.rglob("*")
         if path.is_file()
     }
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Git for Windows long-path regression")
+def test_git_clone_supports_long_windows_run_paths(tmp_path: Path) -> None:
+    git, repository = _repository(tmp_path)
+    destination_parent = tmp_path
+    destination = destination_parent / "verification"
+    representative_pack_path = (
+        destination / ".git" / "objects" / "pack" / ("pack-" + "f" * 40 + ".keep")
+    )
+    while len(str(representative_pack_path)) <= 275:
+        destination_parent /= "proofpatch-run"
+        destination = destination_parent / "verification"
+        representative_pack_path = (
+            destination / ".git" / "objects" / "pack" / ("pack-" + "f" * 40 + ".keep")
+        )
+    destination_parent.mkdir(parents=True)
+
+    git.run(
+        ["clone", "--no-local", "--no-checkout", "--", str(repository), str(destination)],
+        cwd=destination_parent,
+        operation="long-path regression clone",
+    )
+
+    assert len(str(representative_pack_path)) > 260
+    assert (destination / ".git").is_dir()
 
 
 def test_capture_verify_and_apply_all_git_change_types(tmp_path: Path) -> None:

@@ -4,11 +4,11 @@ import os
 import shutil
 import signal
 import subprocess
-from collections.abc import Callable
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Thread
-from typing import BinaryIO, Final, cast
+from typing import BinaryIO, Final
 
 from proofpatch.errors import RepositoryError
 
@@ -123,6 +123,8 @@ class GitClient:
             "core.hooksPath=",
             "-c",
             "core.fsmonitor=false",
+            "-c",
+            "core.longpaths=true",
             *args,
         ]
 
@@ -279,7 +281,7 @@ def _drain_git_pipe(
 
 def _kill_git_process(process: subprocess.Popen[bytes]) -> None:
     try:
-        if os.name == "nt":
+        if sys.platform == "win32":
             taskkill = (
                 Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32" / "taskkill.exe"
             )
@@ -295,8 +297,7 @@ def _kill_git_process(process: subprocess.Popen[bytes]) -> None:
             if process.poll() is None:
                 process.kill()
         else:
-            killpg = cast(Callable[[int, int], None], os.killpg)  # type: ignore[attr-defined]
-            killpg(process.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+            os.killpg(process.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
     except (OSError, ProcessLookupError, subprocess.TimeoutExpired):
         if process.poll() is None:
             process.kill()

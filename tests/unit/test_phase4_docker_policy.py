@@ -113,6 +113,8 @@ def test_builder_enforces_every_required_restriction_and_redacts_environment(
         allowlist=("API_TOKEN",),
     )
     with _container_environment_file(request.environment) as environment_file:
+        assert environment_file is not None
+        canonical_environment_file = environment_file.resolve(strict=True)
         command = DockerCommandBuilder(Path("docker")).build(
             request, environment_file=environment_file
         )
@@ -131,7 +133,7 @@ def test_builder_enforces_every_required_restriction_and_redacts_environment(
     assert "--pid=host" not in command.argv
     assert "super-secret-value" not in command.argv
     assert "--env" not in command.argv
-    assert command.argv[command.argv.index("--env-file") + 1] == str(environment_file)
+    assert command.argv[command.argv.index("--env-file") + 1] == str(canonical_environment_file)
     assert request.image.immutable_reference in command.argv
     workspace_option = next(item for item in command.argv if "dst=/workspace" in item)
     assert workspace_option.endswith(",readonly")

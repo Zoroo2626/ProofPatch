@@ -66,6 +66,7 @@ def test_git_client_always_uses_argument_array_and_shell_false(tmp_path: Path) -
     assert keywords["shell"] is False
     assert "--shared" not in positional[0]
     assert "--reference" not in positional[0]
+    assert "core.longpaths=true" in positional[0]
 
 
 def test_git_client_rejects_ambient_or_invalid_arguments(monkeypatch: pytest.MonkeyPatch) -> None:

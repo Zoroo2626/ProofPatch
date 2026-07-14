@@ -638,8 +638,8 @@ def test_cleanup_rejects_mismatched_expected_identity_path(tmp_path: Path) -> No
 
 def test_explicit_run_and_inspect_options_are_exposed() -> None:
     runner = CliRunner()
-    run_help = runner.invoke(app, ["run", "--help"])
-    inspect_help = runner.invoke(app, ["inspect", "--help"])
+    run_help = runner.invoke(app, ["run", "--help"], terminal_width=240, color=False)
+    inspect_help = runner.invoke(app, ["inspect", "--help"], terminal_width=240, color=False)
     assert run_help.exit_code == inspect_help.exit_code == 0
     for option in ("--keep-workspaces", "--json", "--verbose", "--no-color"):
         assert option in run_help.output
