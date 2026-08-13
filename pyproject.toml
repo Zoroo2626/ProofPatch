@@ -48,6 +48,11 @@ dev = [
 [project.scripts]
 proofpatch = "proofpatch.cli:main"
 
+[project.urls]
+Homepage = "https://github.com/Zoroo2626/ProofPatch"
+Repository = "https://github.com/Zoroo2626/ProofPatch.git"
+Issues = "https://github.com/Zoroo2626/ProofPatch/issues"
+
 [tool.setuptools.dynamic]
 version = { attr = "proofpatch.__version__" }
 
